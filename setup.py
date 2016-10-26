@@ -21,9 +21,7 @@ import setuptools
 # solution from: http://bugs.python.org/issue15881#msg170215
 try:
     import multiprocessing
-    except ImportError:
-        pass
+except ImportError:
+    pass
 
-	setuptools.setup(
-	    setup_requires=['pbr', 'setuptools'],
-	        pbr=True)
+setuptools.setup(setup_requires=['pbr', 'setuptools'], pbr=True)

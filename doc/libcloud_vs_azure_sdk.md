@@ -1,28 +1,10 @@
 ###Apache Libcloud VS. Azure Python SDK
 ###1. Over View
-<table>
-<tr>
-  <td>Type</td>
-  <td>License</td>
-  <td>Last Update(Compute)</td>
-  <td>Last Update(Volume)</td>
-  <td>Author</td>
-</tr>
-<tr>
-  <td>[Apache Libcloud](http://libcloud.apache.org/)</td>
-  <td>Apache 2.0</td>
-  <td>10 months ago</td>
-  <td>6 months ago</td>
-  <td>Contributors</td>
-</tr>
-<tr>
-  <td>[Azure SDK](https://azure.microsoft.com/en-us/develop/python/)</td>
-  <td>MIT</td>
-  <td>4 days ago</td>
-  <td>4 days ago</td>
-  <td>Azure Official</td>
-</tr>
-</table>
+|Type|License|Last Update(Compute)|Last Update(Volume)|Author|
+|:--|:--|:--|:--|:--|
+|[Apache Libcloud](http://libcloud.apache.org/)|Apache 2.0|10 months ago|6 months ago|Contributor|
+|[Azure SDK](https://azure.microsoft.com/en-us/develop/python/)|MIT|4 days ago|4 days ago|Azure Official|
+
 ###2. Supported Matrix
 ####2.1 [Libcloud(Compute)](https://libcloud.readthedocs.io/en/latest/supported_providers.html#supported-methods-base-compute)
 - list nodes
@@ -133,7 +115,7 @@ The Service Management API includes operations for managing the Virtual Machines
 - Get Blob Metadata
 - Set Blob Metadata
 - Lease Blob
-- Snapshot Blob
+- Snapshot Blob 
 - Copy Blob
 - Abort Copy Blob
 - Delete Blob
@@ -159,3 +141,13 @@ Operations on Containers
 - Delete Container
 - Lease Container
 - List Blobs
+
+###3 Conclusion
+both licenses, MIT and apache 2.0 are friendly for using, so the most import is the
+support API, as shown above, it's obviously Azure python SDK is better than Libcloud.
+I propose to use Azure python SDK.
+
+###4 More Info, about "classic" type resources
+As you may see above, Azure has "classic" and "non-classic" type management api to respectively
+manage classic type resources and non-classic type resources. Here the "classic" means "legacy",
+the old type of resources. So we'd better use non-classic resource.

@@ -34,3 +34,14 @@ ChangeLog
 
 # Project file
 .idea
+
+# nova community codes
+nova/
+!nova/virt/azureapi/
+!nova/tests/unit/virt/azureapi/
+
+# cinder community code
+!cinder/volume/drivers/azure/
+!cinder/tests/unit/volume/drivers/azure/
+!cinder/backup/drivers/
+!cinder/tests/unit/backup/drivers/

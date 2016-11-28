@@ -1,0 +1,9 @@
+tox
+testtools>=1.4.0 # MIT
+nose
+flake8
+coveralls
+coverage>=3.6 # Apache-2.0
+fixtures>=3.0.0 # Apache-2.0/BSD
+mock>=2.0 # BSD
+oslotest>=1.10.0 # Apache-2.0

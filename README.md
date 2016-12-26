@@ -12,7 +12,10 @@ clone code from azure_driver repo, include nova and cinder folders.
 #####1.2 Register Azure Account and make a Subscription
 create an user for subscription, then mark down subscription_id,
 username and password of user, this credential info will be filled into
-config file for both nova and cinder.
+config file for both nova and cinder.  
+
+create resource group with name "ops_resource_group" via Azure Portal,
+and storage account with name "ops0storage0account" under the resource group just created.
 
 ####2 nova
 
@@ -27,7 +30,7 @@ $cp /etc/nova/nova.conf /etc/nova/nova-compute.conf
 $vi /etc/nova/nova-compute.conf
 
 [DEFAULT]
-compute_driver=nova.virt.azureapi.AzureDriver
+compute_driver=azureapi.AzureDriver
 [azure]
 location = westus
 resource_group = ops_resource_group
@@ -71,8 +74,7 @@ password = xxxxxx
 azure_storage_container_name = volumes
 azure_total_capacity_gb = 500000
 
-$/usr/local/bin/cinder-volume --config-file /etc/cinder/cinder-volume.conf  & echo 
-$! >/opt/stack/status/stack/c-vol.pid; fg || echo "c-vol failed to start" | tee "/opt/stack/status/stack/c-vol.failure"
+$/usr/local/bin/cinder-volume --config-file /etc/cinder/cinder-volume.conf  & echo ! >/opt/stack/status/stack/c-vol.pid; fg || echo "c-vol failed to start" | tee "/opt/stack/status/stack/c-vol.failure"
 ```
 
 #####3.2 backup

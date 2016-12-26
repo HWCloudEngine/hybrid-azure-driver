@@ -1,5 +1,5 @@
 # 1 nova
-```
+.................................................................................
 Name                                  Stmts   Miss  Cover
 ---------------------------------------------------------
 nova/virt/azureapi/__init__.py            2      0   100%
@@ -7,34 +7,34 @@ nova/virt/azureapi/adapter.py            27      0   100%
 nova/virt/azureapi/conf/__init__.py       0      0   100%
 nova/virt/azureapi/conf/azureapi.py       9      9     0%
 nova/virt/azureapi/constant.py            4      0   100%
-nova/virt/azureapi/driver.py            595     62    90%
+nova/virt/azureapi/driver.py            607     42    93%
 nova/virt/azureapi/exception.py          56      0   100%
 ---------------------------------------------------------
-TOTAL                                   693     71    90%
-```
+TOTAL                                   705     51    93%
+----------------------------------------------------------------------
+Ran 81 tests in 11.605s
+OK
 
 # 2 cinder-volume
-```
+.........................
 Name                                       Stmts   Miss  Cover
 --------------------------------------------------------------
 cinder/volume/drivers/azure/__init__.py        0      0   100%
 cinder/volume/drivers/azure/adapter.py        20      0   100%
-cinder/volume/drivers/azure/driver.py        181     37    80%
+cinder/volume/drivers/azure/driver.py        179     20    89%
 cinder/volume/drivers/azure/vhd_utils.py      27      0   100%
 --------------------------------------------------------------
-TOTAL                                        228     37    84%
---------------------------------------------------------------
-```
+TOTAL                                        226     20    91%
+----------------------------------------------------------------------
+Ran 26 tests in 11.206s
+OK
 
 # 3 cinder-backup
-```
-Name                                       Stmts   Miss  Cover
---------------------------------------------------------------
-cinder/volume/drivers/azure/__init__.py        0      0   100%
-cinder/volume/drivers/azure/adapter.py        20      0   100%
-cinder/volume/drivers/azure/driver.py        181     37    80%
-cinder/volume/drivers/azure/vhd_utils.py      27      0   100%
---------------------------------------------------------------
-TOTAL                                        228     37    84%
---------------------------------------------------------------
-```
+..............
+Name                                    Stmts   Miss  Cover
+-----------------------------------------------------------
+cinder/backup/drivers/azure_backup.py     104      5    95%
+----------------------------------------------------------------------
+Ran 14 tests in 4.718s
+OK
+

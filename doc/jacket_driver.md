@@ -3,7 +3,7 @@
 所有虚拟机创建在同一个resource group下面，暂定名为ops_resource_group, 包括后面的voluem也是这个resource group下，操作系统磁盘azure自动放在名为vhds的storage container里，网络和子网提前创建好，填写好flavor、image的映射。
 linux: boot from instance snapshot can't set adminpass and key. keys were keep from snapshot, password was erased.
 windows boot from instance snapshot scenario unknown.
-快照：通过VM创建镜像，删除镜像时，调用的原生glance接口，未能在azure上及时删除.每次创建快照时，都做一次残余快照清理。
+快照：通过VM创建镜像，删除镜像时，调用的原生glance接口，未能在azure上及时删除.每次执行周期性获取可用资源任务时，都做一次残余快照清理。
 
 映射：
 Instance:  
@@ -196,9 +196,9 @@ Snapshot:
 Openstack: snapshot:{'volume': Volume(), 'metadata': {'azure_snapshot_id': "2016-11-09T14:11:07.6175300Z"}} 其中metadata信息是创建快照后在驱动实现方法处更新snapshot数据库记录。  
 Azure: page blog:{'name': 'volume-17d95073-1ab7-4906-9518-6e09312f1655.vhd', 'snapshot': '2016-11-09T14:11:07.6175300Z'}  
 
-另外关于backup,实现不了,因为现在backup的处理逻辑,没有像volume那样和驱动解藕,它的backup:manager.py里面做了很多固定操作,对于所有备份,
-它都会按照把volume/snapshot在volume节点上准备好,被做备份的节点/服务来连接进行复制.如果要实现,就不只是在驱动层面实现了.对于azure,从卷生成新卷就是
-最实际的备份方法.
+Backup:
+Openstack: volume:{'display_name':'testvolume', 'id': '17d95073-1ab7-4906-9518-6e09312f1655', 'name': 'backup-17d95073-1ab7-4906-9518-6e09312f1655'}
+Azure: page blob:{'name': 'backup-17d95073-1ab7-4906-9518-6e09312f1655.vhd'}
 
 |Category|API|Azure
 |:--|:--|:--
@@ -216,13 +216,13 @@ Azure: page blog:{'name': 'volume-17d95073-1ab7-4906-9518-6e09312f1655.vhd', 'sn
 ||Set image metadata for volume|volume driver管理不了,更新DB操作:self.db.volume_metadata_update
 ||Remove image metadata from volume|volume driver管理不了,更新DB操作:self.db.volume_metadata_delete
 ||Attach volume|Azure api: Create or update a VM  实现细节: 更新VM信息时带上要挂载的volume的blob uri.'data_disk'。
-|Backups (backups)|Create backup|Azure api: Copy Blob  实现细节:只在驱动层面实现不了,详细看开头说明.
+|Backups (backups)|Create backup|Azure api: Copy Blob  实现细节:复制volume的page到新的page,作为backup,volume所有快照都会连带，做到真正是备份。
 ||List backups|volume driver管理不了,查询DB
 ||List backups (detailed)|volume driver管理不了,查询DB
 ||Show backup details|volume driver管理不了,查询DB
-||Delete backup|只在驱动层面实现不了,详细看开头说明.
-||Restore backup|只在驱动层面实现不了,详细看开头说明.
-|Backup actions (backups, action)|Force-delete backup|只在驱动层面实现不了,详细看开头说明.
+||Delete backup|Azure api: Put Page  实现细节: 通过映射关系,找到azure上某个快照的blob,执行删除操作.
+||Restore backup|Azure api: Copy Blob  实现细节: 复制backup到已经存在的volume，azure是完全覆盖。
+|Backup actions (backups, action)|Force-delete backup|同删除backup
 |Quota sets extension (os-quota-sets)|Show quotas|volume driver管理不了,查询DB
 ||Update quotas|volume driver管理不了,更新DB
 ||Delete quotas|volume driver管理不了,更新DB
@@ -254,8 +254,10 @@ Azure: page blog:{'name': 'volume-17d95073-1ab7-4906-9518-6e09312f1655.vhd', 'sn
 
 #### 2 虚拟机网卡
 通常逻辑：创建虚拟机时，先创建网卡，虚拟机创建操作是异常操作，所以无论虚拟机创建是否成功，网卡都已经创建好，这里无法做到及时删除。但用户进行虚拟机删除操作，对网卡进行删除。
-异常逻辑：定期对网卡进行检查，如果没有连接到虚拟机机都进行删除操作。
+异常逻辑：定期对网卡进行检查，如果没有连接到虚拟机机都进行删除操作，定期清除时，都是先拿到上次检查到没用的网卡，与本次检查结果做与运算，对筛选后的网卡执行删除。这样做是为了避免
+	刚好在清理时，有新的实例在创建，也有可能刚好检查到创建实例步骤里面创建的网卡是没有绑定的。
 
 #### 3 snapshot 虚拟机快照，实际在openstack处是image
 通常逻辑：直接进行删除操作，只在glance服务处删除，无法删除azure处的snapshot blob.现在思路是每次定期获取可用资源时进行清理操作.
-异常逻辑：暂时没想到怎样将它放到定期任务执行。
+异常逻辑：将它放到定期任务执行。
+

@@ -93,7 +93,7 @@ class AzureDriver(driver.ComputeDriver):
         # check cidr format
         net_cidr = CONF.azure.vnet_cidr
         subnet_cidr = CONF.azure.vsubnet_cidr
-        if not (netutils.is_valid_cidr(net_cidr) or
+        if not (netutils.is_valid_cidr(net_cidr) and
                 netutils.is_valid_cidr(subnet_cidr)):
             msg = 'Invalid network: %(net_cidr)s/subnet: %(subnet_cidr)s' \
                   ' CIDR' % dict(net_cidr=net_cidr, subnet_cidr=subnet_cidr)
@@ -101,10 +101,14 @@ class AzureDriver(driver.ComputeDriver):
             raise exception.NetworkCreateFailure(reason=msg)
         # Creaet Network
         try:
-            net_info = self.network.virtual_networks.get(
-                CONF.azure.resource_group,
-                CONF.azure.vnet_name)
-            if not net_info:
+            nets = self.network.virtual_networks.list(
+                CONF.azure.resource_group)
+            net_exist = False
+            for i in nets:
+                if i.name == CONF.azure.vnet_name:
+                    net_exist = True
+                    break
+            if not net_exist:
                 network_info = dict(location=CONF.azure.location,
                                     address_space=dict(
                                         address_prefixes=[net_cidr]))
@@ -123,12 +127,18 @@ class AzureDriver(driver.ComputeDriver):
 
         # Create Subnet
         try:
-            subnet_info = self.network.subnets.get(
+            # subnet can't recreate, check existing before create.
+            subnets = self.network.subnets.list(
                 CONF.azure.resource_group,
-                CONF.azure.vnet_name,
-                CONF.azure.vsubnet_name,)
-            if not subnet_info:
-                # subnet can't recreate, check existing before create.
+                CONF.azure.vnet_name)
+            subnet_exist = False
+            subnet_details = None
+            for i in subnets:
+                if i.name == CONF.azure.vsubnet_name:
+                    subnet_exist = True
+                    subnet_details = i
+                    break
+            if not subnet_exist:
                 subnet_info = {'address_prefix': subnet_cidr}
                 async_subnet_creation = self.network.subnets.create_or_update(
                     CONF.azure.resource_group,
@@ -136,7 +146,7 @@ class AzureDriver(driver.ComputeDriver):
                     CONF.azure.vsubnet_name,
                     subnet_info
                 )
-                subnet_info = async_subnet_creation.result()
+                subnet_details = async_subnet_creation.result()
         except Exception as e:
             # delete network if subnet create fail.
             try:
@@ -152,7 +162,7 @@ class AzureDriver(driver.ComputeDriver):
             ex = exception.SubnetCreateFailure(reason=msg)
             LOG.exception(msg)
             raise ex
-        CONF.set_override('vsubnet_id', subnet_info.id, 'azure')
+        CONF.set_override('vsubnet_id', subnet_details.id, 'azure')
         LOG.info(_LI("Create/Update Subnet: %s"), CONF.azure.vsubnet_id)
 
     def init_host(self, host):

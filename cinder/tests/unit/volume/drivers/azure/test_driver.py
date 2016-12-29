@@ -2,6 +2,7 @@ import ddt
 
 import mock
 from oslo_config import cfg
+from oslo_service import loopingcall
 
 from cinder import db
 from cinder import exception
@@ -12,6 +13,18 @@ import cinder.volume.utils
 
 
 CONF = cfg.CONF
+
+
+class FakeLoopingCall(object):
+
+    def __init__(self, method):
+        self.call = method
+
+    def start(self, *a, **k):
+        return self
+
+    def wait(self):
+        self.call()
 
 
 class FakeObj(object):
@@ -43,10 +56,29 @@ class AzureVolumeDriverTestCase(test_volume.DriverTestCase):
             id='snap_id',
             volume_name='vol_name',
             metadata=dict(azure_snapshot_id='snap_id'))
+        self.stubs.Set(loopingcall, 'FixedIntervalLoopingCall',
+                       lambda a: FakeLoopingCall(a))
+
+    def test_empty_methods_implement(self):
+        self.driver.check_for_setup_error()
+        self.driver.ensure_export(self.context, self.fake_vol)
+        self.driver.create_export(self.context, self.fake_vol, 'conn')
+        self.driver.remove_export(self.context, self.fake_vol)
+        self.driver.validate_connector('conn')
+        self.driver.terminate_connection(self.fake_vol, 'conn')
 
     @mock.patch('cinder.volume.drivers.azure.driver.Azure')
     def test_init_raise(self, mock_azure):
         mock_azure.side_effect = Exception
+        self.assertRaises(exception.VolumeBackendAPIException,
+                          driver.AzureDriver,
+                          configuration=self.configuration, db=db)
+
+    @mock.patch('cinder.volume.drivers.azure.driver.Azure')
+    def test_init_create_blob_container_raise(self, mock_azure):
+        blob = mock.Mock()
+        blob.blob.create_container.side_effect = Exception
+        mock_azure.return_value = blob
         self.assertRaises(exception.VolumeBackendAPIException,
                           driver.AzureDriver,
                           configuration=self.configuration, db=db)
@@ -84,7 +116,25 @@ class AzureVolumeDriverTestCase(test_volume.DriverTestCase):
 
     @mock.patch.object(cinder.volume.drivers.azure.vhd_utils,
                        'generate_vhd_footer')
-    def test_create_volume_raise(self, mo_vhd):
+    def test_create_volume(self, mo_vhd):
+        mo_vhd.return_value = 'vhd_footer'
+        self.driver.create_volume(self.fake_vol)
+        self.driver.blob.update_page.assert_called()
+
+    @mock.patch.object(cinder.volume.drivers.azure.vhd_utils,
+                       'generate_vhd_footer')
+    def test_create_volume_create_raise(self, mo_vhd):
+        mo_vhd.return_value = 'vhd_footer'
+        self.driver.blob.update_page.side_effect = Exception
+        self.assertRaises(
+            exception.VolumeBackendAPIException,
+            self.driver.create_volume,
+            self.fake_vol)
+        self.driver.blob.delete_blob.assert_called()
+
+    @mock.patch.object(cinder.volume.drivers.azure.vhd_utils,
+                       'generate_vhd_footer')
+    def test_create_volume_delete_raise(self, mo_vhd):
         mo_vhd.return_value = 'vhd_footer'
         self.driver.blob.update_page.side_effect = Exception
         self.driver.blob.delete_blob.side_effect = Exception
@@ -94,12 +144,16 @@ class AzureVolumeDriverTestCase(test_volume.DriverTestCase):
             self.fake_vol)
 
     def test_delete_volume(self):
+        self.driver.delete_volume(self.fake_vol)
+        self.driver.blob.delete_blob.assert_called()
+
+    def test_delete_volume_miss_raise(self):
         self.driver.blob.delete_blob.side_effect = \
             AzureMissingResourceHttpError('', '')
-        flag = self.driver.delete_volume(self.fake_vol)
-        self.assertEqual(True, flag)
+        self.driver.delete_volume(self.fake_vol)
+        self.driver.blob.delete_blob.assert_called()
 
-    def test_delete_volume_raise(self):
+    def test_delete_volume_delete_raise(self):
         self.driver.blob.delete_blob.side_effect = Exception
         self.assertRaises(
             exception.VolumeBackendAPIException,
@@ -127,12 +181,16 @@ class AzureVolumeDriverTestCase(test_volume.DriverTestCase):
             self.fake_snap)
 
     def test_delete_snapshot(self):
+        self.driver.delete_snapshot(self.fake_snap)
+        self.driver.blob.delete_blob.assert_called()
+
+    def test_delete_snapshot_miss_raise(self):
         self.driver.blob.delete_blob.side_effect = \
             AzureMissingResourceHttpError('', '')
-        ret = self.driver.delete_snapshot(self.fake_snap)
-        self.assertEqual(True, ret)
+        self.driver.delete_snapshot(self.fake_snap)
+        self.driver.blob.delete_blob.assert_called()
 
-    def test_delete_snapshot_raise(self):
+    def test_delete_snapshot_delete_raise(self):
         self.driver.blob.delete_blob.side_effect = Exception
         self.assertRaises(
             exception.VolumeBackendAPIException,
@@ -149,13 +207,9 @@ class AzureVolumeDriverTestCase(test_volume.DriverTestCase):
             self.driver.create_volume_from_snapshot,
             self.fake_vol, self.fake_snap)
 
-    @mock.patch(
-        'cinder.volume.drivers.azure.driver'
-        '.loopingcall.FixedIntervalLoopingCall')
     @mock.patch.object(cinder.volume.drivers.azure.driver.AzureDriver,
                        '_check_exist')
-    def test_create_volume_from_snapshot(self, mo_exit, mock_loop_call):
-        mock_loop_call.return_value = mock.MagicMock()
+    def test_create_volume_from_snapshot(self, mo_exit):
         mo_exit.return_value = True
         self.fake_snap['volume_size'] = 1
         self.fake_vol.size = 2
@@ -176,13 +230,9 @@ class AzureVolumeDriverTestCase(test_volume.DriverTestCase):
             self.driver.create_cloned_volume,
             self.fake_vol, self.fake_snap)
 
-    @mock.patch(
-        'cinder.volume.drivers.azure.driver'
-        '.loopingcall.FixedIntervalLoopingCall')
     @mock.patch.object(cinder.volume.drivers.azure.driver.AzureDriver,
                        '_check_exist')
-    def test_create_cloned_volume(self, mo_exit, mock_loop_call):
-        mock_loop_call.return_value = mock.MagicMock()
+    def test_create_cloned_volume(self, mo_exit):
         mo_exit.return_value = True
         self.fake_snap['volume_size'] = 1
         self.fake_vol.size = 2

@@ -180,7 +180,6 @@ class AzureDriver(driver.VolumeDriver):
             # refer lvm driver, if volume to delete doesn't exist, return True.
             message = (_("Volume blob: %s does not exist.") % volume.name)
             LOG.info(message)
-            return True
         except Exception as e:
             message = (_("Delete Volume %(volume)s in Azure failed. reason: "
                          "%(reason)s") %
@@ -259,7 +258,6 @@ class AzureDriver(driver.VolumeDriver):
             LOG.warning(_LW("snapshot: %s not found, "
                             "skipping delete operations"), snapshot['name'])
             LOG.info(_LI('Successfully deleted snapshot: %s'), snapshot['id'])
-            return True
         except Exception as e:
             message = (_("Create Snapshop %(snapshop)s in Azure failed. "
                          "reason: %(reason)s")

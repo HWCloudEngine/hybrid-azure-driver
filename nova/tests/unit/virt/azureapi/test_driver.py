@@ -1,4 +1,5 @@
 import mock
+from oslo_service import loopingcall
 
 from azure.mgmt.compute import models as azcpumodels
 from azure.storage.blob import models as azsmodels
@@ -26,16 +27,20 @@ FakeAction = mock.Mock()
 FakeAction.wait.return_value = None
 
 
-class FakeObj(object):
-    pass
-
-
 class FakeLoopingCall(object):
+
+    def __init__(self, method):
+        self.call = method
+
     def start(self, *a, **k):
         return self
 
     def wait(self):
-        return None
+        self.call()
+
+
+class FakeObj(object):
+    pass
 
 
 class AzureDriverTestCase(test.NoDBTestCase):
@@ -125,9 +130,36 @@ class AzureDriverTestCase(test.NoDBTestCase):
 
         return instance
 
+    def test_precreate_network_vnet_subnet_non_exist(self):
+        subnet_id = 'subnet_id'
+        net = FakeObj()
+        net.name = CONF.azure.vnet_name
+        subnet = FakeObj()
+        subnet.name = CONF.azure.vsubnet_name
+        subnet.id = subnet_id
+        asyn_net_action = mock.Mock()
+        asyn_net_action.wait.return_value = [net]
+        asyn_subnet_action = mock.Mock()
+        asyn_subnet_action.result.return_value = subnet
+        self.drvr.network.virtual_networks.list.return_value = []
+        self.drvr.network.subnets.list.return_value = []
+        self.drvr.network.virtual_networks.create_or_update.return_value = \
+            asyn_net_action
+        self.drvr.network.subnets.create_or_update.return_value = \
+            asyn_subnet_action
+        self.drvr._precreate_network()
+        self.assertEqual(subnet_id, CONF.azure.vsubnet_id)
+
+    def test_precreate_network_invalid_cidr(self):
+        # invalid cidr will raise
+        self.flags(group='azure', vnet_cidr='10.0.0.0/16',
+                   vsubnet_cidr='vsubnet_cidr')
+        self.assertRaises(exception.NetworkCreateFailure,
+                          self.drvr._precreate_network)
+
     def test_precreate_network_vnet_raise(self):
         # network get exception
-        self.drvr.network.virtual_networks.get.side_effect = Exception
+        self.drvr.network.virtual_networks.list.side_effect = Exception
         self.assertRaises(exception.NetworkCreateFailure,
                           self.drvr._precreate_network)
 
@@ -136,8 +168,8 @@ class AzureDriverTestCase(test.NoDBTestCase):
                             address_space=dict(
                                 address_prefixes=[CONF.azure.vnet_cidr]))
         # subnet get exception, delete network before raise
-        self.drvr.network.virtual_networks.get.return_value = None
-        self.drvr.network.subnets.get.side_effect = Exception
+        self.drvr.network.virtual_networks.list.return_value = []
+        self.drvr.network.subnets.list.side_effect = Exception
         self.assertRaises(exception.SubnetCreateFailure,
                           self.drvr._precreate_network)
         try:
@@ -149,6 +181,11 @@ class AzureDriverTestCase(test.NoDBTestCase):
                     CONF.azure.vnet_name, network_info)
             self.drvr.network.virtual_networks.delete.assert_called_with(
                 CONF.azure.resource_group, CONF.azure.vnet_name)
+
+    @mock.patch.object(driver.AzureDriver, '_precreate_network')
+    def test_init_host(self, mock_precreate_network):
+        self.drvr.init_host('host')
+        mock_precreate_network.assert_called()
 
     def test_init_host_register_riase(self):
         self.drvr.resource.providers.register.side_effect = \
@@ -316,12 +353,23 @@ class AzureDriverTestCase(test.NoDBTestCase):
         self.assertEqual(id_str,
                          network_profile['network_interfaces'][0]['id'])
 
+    def test_get_image_from_mapping(self):
+        image = FakeObj()
+        image.name = list(constant.IMAGE_MAPPING.iterkeys())[0]
+        ret = self.drvr._get_image_from_mapping(image)
+        self.assertEqual(constant.IMAGE_MAPPING.get(image.name), ret)
+
     def test_get_image_from_mapping_not_found(self):
         image = FakeObj()
         image.name = 'fake_image_name'
         self.assertRaises(exception.ImageAzureMappingNotFound,
                           self.drvr._get_image_from_mapping,
                           image)
+
+    def test_get_size_from_flavor(self):
+        flavor = dict(name=list(constant.FLAVOR_MAPPING.iterkeys())[0])
+        ret = self.drvr._get_size_from_flavor(flavor)
+        self.assertEqual(constant.FLAVOR_MAPPING.get(flavor['name']), ret)
 
     def test_get_size_from_flavor_not_found(self):
         flavor = dict(name='fake_image_name')
@@ -382,19 +430,17 @@ class AzureDriverTestCase(test.NoDBTestCase):
         vm = self.drvr._create_vm_parameters('', '', '', None)
         self.assertNotIn('os_profile', vm)
 
-    def test_create_vm_not_none_parameters(self):
+    def test_create_vm_parameters(self):
         # os profile is not None
         vm = self.drvr._create_vm_parameters('', '', '', 'os_profile')
         self.assertIn('os_profile', vm)
 
     @mock.patch.object(AzureDriver, '_copy_blob')
     @mock.patch.object(AzureDriver, '_get_image_from_mapping')
-    @mock.patch(
-        'nova.virt.azureapi.driver.loopingcall.FixedIntervalLoopingCall')
     def test_prepare_storage_profile_from_exported_image(
-            self, mock_loop_call,
-            mock_image_mapping, mock_copy_blob):
-        mock_loop_call.return_value = mock.MagicMock()
+            self, mock_image_mapping, mock_copy_blob):
+        self.stubs.Set(loopingcall, 'FixedIntervalLoopingCall',
+                       lambda a: FakeLoopingCall(a))
         image_meta = FakeObj()
         image_meta.id = 'image_id'
         image = dict(id='image_id',
@@ -417,11 +463,10 @@ class AzureDriverTestCase(test.NoDBTestCase):
 
     @mock.patch.object(AzureDriver, '_copy_blob')
     @mock.patch.object(AzureDriver, '_get_image_from_mapping')
-    @mock.patch(
-        'nova.virt.azureapi.driver.loopingcall.FixedIntervalLoopingCall')
     def test_prepare_storage_profile_from_image_bad_parms(
-            self, mock_loop_call, mock_image_mapping, mock_copy_blob):
-        mock_loop_call.return_value = mock.MagicMock()
+            self, mock_image_mapping, mock_copy_blob):
+        self.stubs.Set(loopingcall, 'FixedIntervalLoopingCall',
+                       lambda a: FakeLoopingCall(a))
         image_meta = FakeObj()
         image_meta.id = 'image_id'
         image = dict(id='image_id',
@@ -435,11 +480,10 @@ class AzureDriverTestCase(test.NoDBTestCase):
 
     @mock.patch.object(AzureDriver, '_copy_blob')
     @mock.patch.object(AzureDriver, '_get_image_from_mapping')
-    @mock.patch(
-        'nova.virt.azureapi.driver.loopingcall.FixedIntervalLoopingCall')
     def test_prepare_storage_profile_from_image(
-            self, mock_loop_call, mock_image_mapping, mock_copy_blob):
-        mock_loop_call.return_value = mock.MagicMock()
+            self, mock_image_mapping, mock_copy_blob):
+        self.stubs.Set(loopingcall, 'FixedIntervalLoopingCall',
+                       lambda a: FakeLoopingCall(a))
         image_meta = FakeObj()
         image_meta.id = 'image_id'
         image = dict(id='image_id')
@@ -497,6 +541,14 @@ class AzureDriverTestCase(test.NoDBTestCase):
             exception.InstanceGetFailure,
             self.drvr._get_instance,
             self.fake_instance.uuid)
+
+    def test_create_update_instance(self):
+        asyn_vm_action = mock.Mock()
+        asyn_vm_action.wait = mock.Mock()
+        self.drvr.compute.virtual_machines.create_or_update.return_value = \
+            asyn_vm_action
+        self.drvr._create_update_instance(self.fake_instance, 'vm_parameters')
+        self.drvr.compute.virtual_machines.create_or_update.assert_called()
 
     def test_create_update_instance_miss(self):
         # miss test
@@ -793,11 +845,10 @@ class AzureDriverTestCase(test.NoDBTestCase):
         self.assertEqual(1, mo_create.call_count)
         self.assertEqual(0, len(data_disks_obj.data_disks))
 
-    @mock.patch(
-        'nova.virt.azureapi.driver.loopingcall.FixedIntervalLoopingCall')
     @mock.patch.object(AzureDriver, '_copy_blob')
-    def test_snapshot(self, mock_copy, mock_loop_call):
-        mock_loop_call.return_value = mock.MagicMock()
+    def test_snapshot(self, mock_copy):
+        self.stubs.Set(loopingcall, 'FixedIntervalLoopingCall',
+                       lambda a: FakeLoopingCall(a))
         update_stask = mock.Mock()
         image_id = 'image_id'
         self.drvr._image_api.get.return_value = dict(id=image_id)

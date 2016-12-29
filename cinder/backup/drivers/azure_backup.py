@@ -75,7 +75,8 @@ class AzureBackupDriver(driver.BackupDriver):
         except Exception as e:
             message = (_("Copy blob %(blob_name)s from %(source_uri)s in Azure"
                          " failed. reason: %(reason)s")
-                       % dict(blob_name=blob_name, source_uri=source_uri,
+                       % dict(blob_name=blob_name,
+                              source_uri=source_uri,
                               reason=six.text_type(e)))
             LOG.exception(message)
             raise exception.BackupDriverException(data=message)
@@ -102,7 +103,8 @@ class AzureBackupDriver(driver.BackupDriver):
 
         only support backup from and to azure.
         """
-        volume = self.db.volume_get(self.context, backup['volume_id'])
+        volume = self.db.volume_get(self.context,
+                                    backup['volume_id'])
         src_blob_name = self._get_blob_name(volume['name'])
         exists = self._check_exist(
             CONF.azure_volume_container_name,
@@ -114,7 +116,8 @@ class AzureBackupDriver(driver.BackupDriver):
 
         blob_name = self._get_blob_name(backup['name'])
         src_blob_uri = self.blob.make_blob_url(
-            CONF.azure_volume_container_name, src_blob_name)
+            CONF.azure_volume_container_name,
+            src_blob_name)
         self._copy_blob(CONF.azure_backup_container_name,
                         blob_name,
                         src_blob_uri)
@@ -159,7 +162,8 @@ class AzureBackupDriver(driver.BackupDriver):
 
         blob_name = self._get_blob_name(volume_name)
         src_blob_uri = self.blob.make_blob_url(
-            CONF.azure_backup_container_name, src_blob_name)
+            CONF.azure_backup_container_name,
+            src_blob_name)
         self._copy_blob(CONF.azure_volume_container_name,
                         blob_name,
                         src_blob_uri)
@@ -192,8 +196,9 @@ class AzureBackupDriver(driver.BackupDriver):
                   .format(backup_name))
         try:
             self.blob.delete_blob(
-                CONF.azure_volume_container_name,
-                blob_name, delete_snapshots='include')
+                CONF.azure_backup_container_name,
+                blob_name,
+                delete_snapshots='include')
         except AzureMissingResourceHttpError:
             # refer lvm driver, if volume to delete doesn't exist, return True.
             message = (_("Backup blob: %s does not exist.") % backup_name)

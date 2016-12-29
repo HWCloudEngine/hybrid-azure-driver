@@ -2,6 +2,7 @@ import ddt
 
 import mock
 from oslo_config import cfg
+from oslo_service import loopingcall
 
 from cinder.backup.drivers import azure_backup
 from cinder import context
@@ -19,6 +20,17 @@ class FakeObj(object):
     def __getitem__(self, item):
         self.__getattribute__(item)
 
+class FakeLoopingCall(object):
+
+    def __init__(self, method):
+        self.call = method
+        print(str(method))
+
+    def start(self, *a, **k):
+        return self
+
+    def wait(self):
+        self.call()
 
 @ddt.ddt
 class AzureBackupDriverTestCase(test.TestCase):
@@ -32,10 +44,22 @@ class AzureBackupDriverTestCase(test.TestCase):
         self.fack_backup = dict(name='backup_name',
                                 id='backup_id',
                                 volume_id='volume_id')
+        self.stubs.Set(loopingcall, 'FixedIntervalLoopingCall',
+                       lambda a: FakeLoopingCall(a))
+
 
     @mock.patch('cinder.backup.drivers.azure_backup.Azure')
-    def test_init_raise(self, mock_azure):
+    def test_init_adapter_raise(self, mock_azure):
         mock_azure.side_effect = Exception
+        self.assertRaises(exception.BackupDriverException,
+                          azure_backup.AzureBackupDriver,
+                          self.cxt)
+
+    @mock.patch('cinder.backup.drivers.azure_backup.Azure')
+    def test_init_create_blob_container_raise(self, mock_azure):
+        blob = mock.Mock()
+        blob.blob.create_container.side_effect = Exception
+        mock_azure.return_value = blob
         self.assertRaises(exception.BackupDriverException,
                           azure_backup.AzureBackupDriver,
                           self.cxt)
@@ -94,14 +118,12 @@ class AzureBackupDriverTestCase(test.TestCase):
 
     @mock.patch.object(cinder.backup.drivers.azure_backup.AzureBackupDriver,
                        '_copy_blob')
-    @mock.patch(
-        'cinder.backup.drivers.azure_backup'
-        '.loopingcall.FixedIntervalLoopingCall')
     @mock.patch.object(cinder.backup.drivers.azure_backup.AzureBackupDriver,
                        '_check_exist')
-    def test_backup(self, mo_exit, mock_loop_call, mo_copy):
+    def test_backup(self, mo_exit, mo_copy):
         mo_exit.return_value = True
-        mock_loop_call.return_value = mock.MagicMock()
+        # self.stubs.Set(loopingcall, 'FixedIntervalLoopingCall',
+        #                lambda a: FakeLoopingCall(a))
         self.driver.db.volume_get = mock.Mock(return_value=self.fack_backup)
         self.driver.backup(self.fack_backup, 'vol_file')
         mo_copy.assert_called()
@@ -117,15 +139,17 @@ class AzureBackupDriverTestCase(test.TestCase):
 
     @mock.patch.object(cinder.backup.drivers.azure_backup.AzureBackupDriver,
                        '_copy_blob')
-    @mock.patch(
-        'cinder.backup.drivers.azure_backup'
-        '.loopingcall.FixedIntervalLoopingCall')
+    # @mock.patch(
+    #     'cinder.backup.drivers.azure_backup'
+    #     '.loopingcall.FixedIntervalLoopingCall')
     @mock.patch.object(cinder.backup.drivers.azure_backup.AzureBackupDriver,
                        '_check_exist')
-    def test_restore(self, mo_exit, mock_loop_call, mo_copy):
+    def test_restore(self, mo_exit, mo_copy):
         mo_exit.return_value = True
         self.driver.db.volume_get = mock.Mock(return_value=self.fack_backup)
-        mock_loop_call.return_value = mock.MagicMock()
+        # mock_loop_call.return_value = FakeLoopingCall()
+        # self.stubs.Set(loopingcall, 'FixedIntervalLoopingCall',
+        #                lambda a: FakeLoopingCall(a))
         self.driver.restore(self.fack_backup, 'vol_id', 'vol_file')
         mo_copy.assert_called()
 

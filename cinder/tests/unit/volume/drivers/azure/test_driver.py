@@ -3,6 +3,7 @@ import ddt
 import mock
 from oslo_config import cfg
 from oslo_service import loopingcall
+from oslo_utils import units
 
 from cinder import db
 from cinder import exception
@@ -234,11 +235,36 @@ class AzureVolumeDriverTestCase(test_volume.DriverTestCase):
                        '_check_exist')
     def test_create_cloned_volume(self, mo_exit):
         mo_exit.return_value = True
-        self.fake_snap['volume_size'] = 1
+        self.fake_snap['size'] = 1
         self.fake_vol.size = 2
         self.fake_vol.update = mock.Mock()
         self.fake_vol.save = mock.Mock()
-        self.driver.create_volume_from_snapshot(self.fake_vol, self.fake_snap)
+        self.driver.create_cloned_volume(self.fake_vol, self.fake_snap)
         self.fake_vol.update.assert_called_once_with(
-            dict(size=self.fake_snap['volume_size']))
+            dict(size=self.fake_snap['size']))
+        self.fake_vol.save.assert_called_once()
+
+    @mock.patch.object(cinder.volume.drivers.azure.driver.AzureDriver,
+                       '_check_exist')
+    def test_create_volume_from_image_miss(self, mo_exit):
+        # non exist image, raise not found
+        mo_exit.return_value = False
+        self.assertRaises(
+            exception.ImageNotFound,
+            self.driver.clone_image,
+            self.context, self.fake_vol, '', self.fake_snap, '')
+
+    @mock.patch.object(cinder.volume.drivers.azure.driver.AzureDriver,
+                       '_check_exist')
+    def test_create_volume_from_image(self, mo_exit):
+        mo_exit.return_value = True
+        size = 1
+        self.fake_snap['size'] = size * units.Gi
+        self.fake_vol.size = 2
+        self.fake_vol.update = mock.Mock()
+        self.fake_vol.save = mock.Mock()
+        self.driver.clone_image(self.context, self.fake_vol, '',
+                                self.fake_snap, '')
+        self.fake_vol.update.assert_called_once_with(
+            dict(size=size))
         self.fake_vol.save.assert_called_once()

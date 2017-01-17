@@ -273,6 +273,15 @@ class AzureDriver(driver.ComputeDriver):
             vm = self.compute.virtual_machines.get(
                 CONF.azure.resource_group, instance_id, expand='instanceView')
         # azure may raise msrestazure.azure_exceptions CloudError
+        except exception.CloudError as e:
+            msg = six.text_type(e)
+            if 'ResourceNotFound' in msg:
+                raise nova_ex.InstanceNotFound(instance_id=instance.uuid)
+            else:
+                LOG.exception(msg)
+                ex = exception.InstanceGetFailure(reason=six.text_type(e),
+                                                  instance_uuid=instance_id)
+                raise ex
         except Exception as e:
             msg = six.text_type(e)
             LOG.exception(msg)
@@ -518,14 +527,13 @@ class AzureDriver(driver.ComputeDriver):
                 LOG.exception(msg)
                 raise ex
 
-        # boot from normal openstack images, mapping to  azure marketplace
-        # images.
+        # boot from normal openstack images, mapping to  azure marketplace or
+        # customized image, which has been uploaded to azure.
         else:
             image_reference = self._get_image_from_mapping(image_meta)
             uri = self.blob.make_blob_url(
                 VHDS_CONTAINER, self._get_blob_name(instance.uuid))
             storage_profile = {
-                'image_reference': image_reference,
                 'os_disk': {
                     'name': instance.uuid,
                     'caching': 'None',
@@ -534,7 +542,30 @@ class AzureDriver(driver.ComputeDriver):
                 }
             }
 
+            # customized images
+            if 'uri' in image_reference:
+                storage_profile['image'] = {
+                    'uri': image_reference['uri']
+                }
+                storage_profile['os_type'] = image_reference['os_type']
+            # azure marketplace images
+            else:
+                storage_profile['image_reference'] = image_reference
+
         return storage_profile
+
+    def _attach_block_device(self, context, instance, block_device_info):
+        block_device_mapping = []
+        if block_device_info is not None:
+            block_device_mapping = driver.block_device_info_get_mapping(
+                block_device_info)
+        if block_device_mapping:
+            msg = "Block device information present: %s" % block_device_info
+            LOG.debug(msg, instance=instance)
+
+            for disk in block_device_mapping:
+                connection_info = disk['connection_info']
+                self.attach_volume(context, connection_info, instance, None)
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, network_info=None, block_device_info=None):
@@ -557,6 +588,9 @@ class AzureDriver(driver.ComputeDriver):
             self._create_update_instance(instance, vm_parameters)
             LOG.info(_LI("Create Instance in Azure Finish."),
                      instance=instance)
+
+            self._attach_block_device(context, instance, block_device_info)
+
         except Exception as e:
             LOG.exception(_LE("Instance Spawn failed, start cleanup instance"),
                           instance=instance)
@@ -735,6 +769,7 @@ class AzureDriver(driver.ComputeDriver):
                 attach_block_devices, network_info=None,
                 recreate=False, block_device_info=None,
                 preserve_ephemeral=False):
+
         try:
             async_vm_action = self.compute.virtual_machines.redeploy(
                 CONF.azure.resource_group, instance.uuid)

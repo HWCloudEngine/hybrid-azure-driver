@@ -31,6 +31,9 @@ volume_opts = [
     cfg.StrOpt('azure_storage_container_name',
                default='volumes',
                help='Azure Storage Container Name'),
+    cfg.StrOpt('azure_image_container_name',
+               default='images',
+               help='Azure Image Container Name'),
     cfg.IntOpt('azure_total_capacity_gb',
                help='Total capacity in Azuer, in GB',
                default=500000)
@@ -39,6 +42,7 @@ volume_opts = [
 CONF = cfg.CONF
 CONF.register_opts(volume_opts)
 VHD_EXT = 'vhd'
+IMAGE_PREFIX = 'image'
 
 
 class AzureDriver(driver.VolumeDriver):
@@ -63,6 +67,8 @@ class AzureDriver(driver.VolumeDriver):
         try:
             self.blob.create_container(
                 self.configuration.azure_storage_container_name)
+            self.blob.create_container(
+                self.configuration.azure_image_container_name)
         except Exception as e:
             message = (_("Initialize Azure Adapter failed. reason: %s")
                        % six.text_type(e))
@@ -112,10 +118,12 @@ class AzureDriver(driver.VolumeDriver):
             LOG.exception(message)
             raise exception.VolumeBackendAPIException(data=message)
 
-    def _check_exist(self, blob_name, snapshot=None):
+    def _check_exist(self, blob_name, snapshot=None, container_name=None):
+        if not container_name:
+            container_name = self.configuration.azure_storage_container_name
         try:
             exists = self.blob.exists(
-                self.configuration.azure_storage_container_name,
+                container_name,
                 blob_name,
                 snapshot=snapshot
             )
@@ -359,3 +367,54 @@ class AzureDriver(driver.VolumeDriver):
                              volume_size=src_vref['size']))
             volume.update(dict(size=src_vref['size']))
             volume.save()
+
+    def clone_image(self, context, volume,
+                    image_location, image_meta,
+                    image_service):
+        image_blob = IMAGE_PREFIX + '-' + image_meta['id']
+        src_blob_name = self._get_blob_name(image_blob)
+        exists = self._check_exist(
+            src_blob_name,
+            container_name=self.configuration.azure_image_container_name)
+        if not exists:
+            LOG.warning(_LW('Copy an Inexistent Image: %s in '
+                            'Azure.'), src_blob_name)
+            raise exception.ImageNotFound(image_id=image_meta['id'])
+
+        blob_name = self._get_blob_name(volume.name)
+        src_blob_uri = self.blob.make_blob_url(
+            self.configuration.azure_image_container_name, src_blob_name)
+        self._copy_blob(blob_name, src_blob_uri)
+
+        def _wait_for_copy():
+            """Called at an copy until finish."""
+            copy = self.blob.get_blob_properties(
+                self.configuration.azure_storage_container_name,
+                blob_name)
+            state = copy.properties.copy.status
+
+            if state == 'success':
+                LOG.info(_LI("Created Volume from Image: %s in "
+                             "Azure."), blob_name)
+                raise loopingcall.LoopingCallDone()
+            else:
+                LOG.debug('Create Volume from Image: %(blob_name)s'
+                          ' in Azure Progress %(progress)s' %
+                          dict(blob_name=blob_name,
+                               progress=copy.properties.copy.progress))
+
+        timer = loopingcall.FixedIntervalLoopingCall(_wait_for_copy)
+        timer.start(interval=0.5).wait()
+
+        # check size of new create volume with source volume, can't resize
+        # blob in azure.
+        image_size = image_meta['size'] * 1.0 / units.Gi
+        if volume['size'] != image_size:
+            LOG.warning(_LW("Created Volume from Image: %(blob_name)s in Azure"
+                            " can't be resized, use Image size "
+                            "%(image_size)s GB for new Volume."),
+                        dict(blob_name=blob_name,
+                             image_size=image_size))
+            volume.update(dict(size=image_size))
+            volume.save()
+        return None, True

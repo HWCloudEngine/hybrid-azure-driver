@@ -45,57 +45,57 @@ class OSTypeNotFound(exception.NotFound):
 
 class NetworkCreateFailure(exception.NovaException):
     msg_fmt = _("Unabled to create network in Azure"
-                "because %(reason)s")
+                " because %(reason)s")
 
 
 class SubnetCreateFailure(exception.NovaException):
     msg_fmt = _("Unabled to create subnet in Azure"
-                "because %(reason)s")
+                " because %(reason)s")
 
 
 class ProviderRegisterFailure(exception.NovaException):
     msg_fmt = _("Unabled to register provider in Azure"
-                "because %(reason)s")
+                " because %(reason)s")
 
 
 class ResourceGroupCreateFailure(exception.NovaException):
     msg_fmt = _("Unabled to create resource group in Azure"
-                "because %(reason)s")
+                " because %(reason)s")
 
 
 class StorageAccountCreateFailure(exception.NovaException):
     msg_fmt = _("Unabled to create storage account in Azure"
-                "because %(reason)s")
+                " because %(reason)s")
 
 
 class StorageContainerCreateFailure(exception.NovaException):
     msg_fmt = _("Unabled to create storage container in Azure"
-                "because %(reason)s")
+                " because %(reason)s")
 
 
 class InstanceGetFailure(exception.NovaException):
     msg_fmt = _("Unabled to query instance %(instance_uuid)s in Azure"
-                "because %(reason)s")
+                " because %(reason)s")
 
 
 class InstanceListFailure(exception.NovaException):
     msg_fmt = _("Unabled to list instances in Azure"
-                "because %(reason)s")
+                " because %(reason)s")
 
 
 class InstanceDeleteFailure(exception.NovaException):
     msg_fmt = _("Unabled to delete instance %(instance_uuid)s in Azure"
-                "because %(reason)s")
+                " because %(reason)s")
 
 
 class InstanceResizeFailure(exception.NovaException):
     msg_fmt = _("Unabled to resize instance %(instance_uuid)s in Azure"
-                "because %(reason)s")
+                " because %(reason)s")
 
 
 class InstanceCreateUpdateFailure(exception.NovaException):
     msg_fmt = _("Unabled to create/update instance %(instance_uuid)s in Azure"
-                "because %(reason)s")
+                " because %(reason)s")
 
 
 class InstancePasswordSetFailure(exception.NovaException):
@@ -105,7 +105,7 @@ class InstancePasswordSetFailure(exception.NovaException):
 
 class ComputeUsageListFailure(exception.NovaException):
     msg_fmt = _("Unabled to list compute usage in Azure"
-                "because %(reason)s")
+                " because %(reason)s")
 
 
 class NetworkInterfaceCreateFailure(exception.NovaException):
@@ -139,4 +139,4 @@ class BlobNotFound(exception.NotFound):
 
 class CleanUpFilure(exception.NovaException):
     msg_fmt = _("Unabled to clean up in Azure"
-                "because %(reason)s")
+                " because %(reason)s")

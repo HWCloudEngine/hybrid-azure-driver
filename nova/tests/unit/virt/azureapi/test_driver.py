@@ -40,7 +40,10 @@ class FakeLoopingCall(object):
 
 
 class FakeObj(object):
-    pass
+    msg = None
+
+    def __str__(self):
+        return self.msg
 
 
 class AzureDriverTestCase(test.NoDBTestCase):
@@ -245,6 +248,16 @@ class AzureDriverTestCase(test.NoDBTestCase):
         mock_list.return_value = instances
         ret = self.drvr.list_instance_uuids()
         self.assertEqual(instances, ret)
+
+    def test_get_info_not_found(self):
+        response = FakeObj()
+        response.status_code = 404
+        response.msg = 'ResourceNotFound'
+        self.drvr.compute.virtual_machines.get.side_effect = \
+            exception.CloudError(response, error='ResourceNotFound')
+        self.assertRaises(nova_ex.InstanceNotFound,
+                          self.drvr.get_info,
+                          self.fake_instance)
 
     def test_get_info_raise(self):
         self.drvr.compute.virtual_machines.get.side_effect = \
@@ -852,7 +865,7 @@ class AzureDriverTestCase(test.NoDBTestCase):
         update_stask = mock.Mock()
         image_id = 'image_id'
         name = 'snap-name'
-        self.drvr._image_api.get.return_value = dict(id=image_id, name='name')
+        self.drvr._image_api.get.return_value = dict(id=image_id, name=name)
         self.drvr.blob.make_blob_url = lambda x, y: y
         self.drvr._get_snapshot_blob_name_from_id = lambda x: x
         self.drvr._get_blob_name = lambda x: x

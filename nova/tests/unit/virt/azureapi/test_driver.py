@@ -40,7 +40,10 @@ class FakeLoopingCall(object):
 
 
 class FakeObj(object):
-    pass
+    msg = None
+
+    def __str__(self):
+        return self.msg
 
 
 class AzureDriverTestCase(test.NoDBTestCase):
@@ -245,6 +248,16 @@ class AzureDriverTestCase(test.NoDBTestCase):
         mock_list.return_value = instances
         ret = self.drvr.list_instance_uuids()
         self.assertEqual(instances, ret)
+
+    def test_get_info_not_found(self):
+        response = FakeObj()
+        response.status_code = 404
+        response.msg = 'ResourceNotFound'
+        self.drvr.compute.virtual_machines.get.side_effect = \
+            exception.CloudError(response, error='ResourceNotFound')
+        self.assertRaises(nova_ex.InstanceNotFound,
+                          self.drvr.get_info,
+                          self.fake_instance)
 
     def test_get_info_raise(self):
         self.drvr.compute.virtual_machines.get.side_effect = \

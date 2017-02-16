@@ -1,8 +1,6 @@
 ### Jacket Nova API
 ####说明
-所有虚拟机创建在同一个resource group下面，暂定名为ops_resource_group, 包括后面的voluem也是这个resource group下，操作系统磁盘azure自动放在名为vhds的storage container里，网络和子网提前创建好，填写好flavor、image的映射。
-linux: boot from instance snapshot can't set adminpass and key. keys were keep from snapshot, password was erased.
-windows boot from instance snapshot scenario unknown.
+所有虚拟机创建在同一个resource group下面，名为ops_resource_group, 包括后面的voluem也是这个resource group下，操作系统磁盘azure自动放在名为vhds的storage container里，网络和子网提前创建好，填写好flavor、image的映射。
 快照：通过VM创建镜像，删除镜像时，调用的原生glance接口，未能在azure上及时删除.由于删除操作需要调用glance的接口，所以只能放到每次用户要创建快照时，才用当前用户的context来执行调用glance api获取当前的快照列表，来与azure的对比，
 找出僵尸快照进行删除操作。
 
@@ -11,6 +9,10 @@ Instance:
 Openstack instance: {'uuid': '21b87391-a91e-4ad0-8bac-855271af61fd', 'name': 'azure13'}  
 Azure instance: {'name': '21b87391-a91e-4ad0-8bac-855271af61fd'}, os_disk {'name': '21b87391-a91e-4ad0-8bac-855271af61fd.vhd'}, interface {'name': '21b87391-a91e-4ad0-8bac-855271af61fd'}
 Image:
+1, Azure markerplace image:
+Openstack image: {'id': '21b87391-a91e-4ad0-8bac-855271af61fd', 'name': 'azure13'}  
+Azure image blob: {'publisher': 'Canonical', 'offer': 'UbuntuServer', 'sku': '16.04.0-LTS', 'version': 'latest'}
+2, customized image:
 Openstack image: {'id': '21b87391-a91e-4ad0-8bac-855271af61fd', 'name': 'azure13'}  
 Azure image blob: {'os_type': 'linux(or windows...)', 'uri': 'image-21b87391-a91e-4ad0-8bac-855271af61fd.vhd'}
 
@@ -182,13 +184,18 @@ _cleanup_incomplete_migrations||不支持migration
 ### Jacket Cinder API
 ####说明
 OpenStack里面的volume对应azure里面是Storage里面的Page Blog,包括创建VM时指定的操作系统盘,额外挂载的数据盘,存储镜像,从VM导出的镜像,快照都是它.
-在名为ops_resource_group的resource group 下面创建名为ops0storage0account的storage account, 用0分隔单词是因为它只接受字母与数据。创建名为volume的storage container,
-所有volume数额资源放在里，包括snapshot,backup等。另外名为vhds的storage container是虚拟机系统磁盘存放位置。
+在名为ops_resource_group的resource group 下面创建名为ops0storage0account的storage account, 用0分隔单词是因为它只接受字母与数据。
+创建如下几个container:
+- volumes: volume, backup创建在这里
+- snapshots: 创建的snapshots在这里
+- images: 用户自制镜像上传到这里
+- vhds: 平台自动创建,用来存放VM的系统磁盘.不能动平台自动创建的任何blob.
 
-- 容量是512B倍数.但由于VM最小接受磁盘容量是1GB,所以这里也建议最小可创建容量为1GB(是站在虚拟机操作系统里看到的大小，blog应该是1GB+512Byte).
-- VM挂载磁盘必须是以vhd结尾的page blob,而且是标准的VHD格式文件.
+卷特别说明:
+- 容量是512B倍数,最大为1023GB.但由于VM最小接受磁盘容量是1GB,所以这里也建议最小可创建容量为1GB(是站在虚拟机操作系统里看到的大小，blog应该是1GB+512Byte).
+- VM挂载磁盘必须是以vhd结尾的page blob,而且是标准的VHD格式文件,固定大小的VHD.
 - VHD格式在文件最后512字节是格式内容，创建空page blob时把最后512字节按VHD格式要求写入内容。
-- 从volume/snapshot创建volume，只能是以原来的大小创建，因为对应在azure是一个vhd文件，改变其大小而不丢数据，大问题。
+- 从volume/snapshot创建volume，只能是以原来的大小创建，因为对应在azure是一个page blob, 里面是VHD文件,虽然page blob可以修改大小,但修改大小只是改变azure平台为你分配的空间,并未修改VHD文件内容,所以这个VHD在挂载使用时,还是原来的大小.
 - 一个VM只能挂载一块额外数据盘.在操作系统里面看到设备号,至少是第三块设备,因为azure会在创建VM时,除了系统磁盘外,还会挂载一块临时磁盘,官方文档明确不要写数据到临时磁盘.
 
 映射关系：  
@@ -262,13 +269,17 @@ Azure: page blob:{'name': 'backup-17d95073-1ab7-4906-9518-6e09312f1655.vhd'}
 	刚好在清理时，有新的实例在创建，也有可能刚好检查到创建实例步骤里面创建的网卡是没有绑定的。
 
 #### 3 snapshot 虚拟机快照，实际在openstack处是image
-通常逻辑：直接进行删除操作，只在glance服务处删除，无法删除azure处的snapshot blob.现在思路是每次定期获取可用资源时进行清理操作.
-异常逻辑：将它放到定期任务执行。
+通常逻辑：直接进行删除操作，只在glance服务处删除，无法删除azure处的snapshot blob.只能本用户在一下次创建快照时才对之前删除的快照进行移除,因为要调用到glance的接口,要有context,所以无法加入到定期任务中
+异常逻辑：只能本用户在一下次创建快照时才对之前删除的快照进行移除,因为要调用到glance的接口,要有context,所以无法加入到定期任务中
 
 ###局限说明
 |API|Constrains
 |:--|:--
 |从非azure镜像市场的镜像创建虚拟机|不支持修改登陆密码,目前只能在azure portal进行密码修改, 同样虚拟机创建后,也无法修改密码,密码为原镜像密码.
 |从镜像/卷/快照/创建卷|大小只能跟源镜像/卷/快照一样,不支持修改大小,创建过程会将新创建卷的大小修改为源大小,然后打日志说明不支持修改大小
-|删除快照|在azure上面的快照,只能本用户在一下次创建快照时才对上一次删除的快照进行移除,因为要调用到glance的接口,要有context,所以无法加入到定期任务中
+|删除快照|在azure上面的快照,只能本用户在一下次创建快照时才对之前删除的快照进行移除,因为要调用到glance的接口,要有context,所以无法加入到定期任务中
 ||
+
+###卷更改大小的一些探索和思路
+-1: 跟空白卷创建时类似,针对现有的卷,自己填充VHD最后512字节,可能要考虑到当前卷是有内容的.
+-2: azure官方的操作指南,关于挂载到VM的磁盘,是可以改变它的大小的, 更新VM接口,填入在扩容后的容量大小, azure会对磁盘进行扩容.但这种做法依赖于VM.

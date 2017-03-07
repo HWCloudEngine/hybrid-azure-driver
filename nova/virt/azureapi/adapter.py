@@ -15,8 +15,6 @@ from azure.common.credentials import UserPassCredentials
 from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.resource import ResourceManagementClient
-from azure.mgmt.storage import StorageManagementClient
-from azure.storage import CloudStorageAccount
 from nova import conf
 from nova.i18n import _LI
 from nova.virt.azureapi import exception
@@ -24,7 +22,6 @@ from oslo_config import cfg
 from oslo_log import log as logging
 import six
 
-# TODO(haifeng) remove these option block to nova/conf/azureapi
 CONF = conf.CONF
 LOG = logging.getLogger(__name__)
 
@@ -35,11 +32,6 @@ compute_opts = [
     cfg.StrOpt('resource_group',
                default='ops_resource_group',
                help='Azure Resource Group Name'),
-    cfg.StrOpt('storage_account',
-               default='ops0storage0account',
-               help="""Azure Storage Account Name, should be unique in Azure,
-    Storage account name must be between 3 and 24 characters in length
-    and use numbers and lower-case letters only."""),
     cfg.StrOpt('subscription_id',
                help='Azure subscription ID'),
     cfg.StrOpt('username',
@@ -83,8 +75,6 @@ class Azure(object):
                                                  CONF.azure.subscription_id)
         self.compute = ComputeManagementClient(credentials,
                                                CONF.azure.subscription_id)
-        self.storage = StorageManagementClient(credentials,
-                                               CONF.azure.subscription_id)
         self.network = NetworkManagementClient(credentials,
                                                CONF.azure.subscription_id)
         try:
@@ -92,8 +82,6 @@ class Azure(object):
             LOG.info(_LI("Register Microsoft.Network"))
             self.resource.providers.register('Microsoft.Compute')
             LOG.info(_LI("Register Microsoft.Compute"))
-            self.resource.providers.register('Microsoft.Storage')
-            LOG.info(_LI("Register Microsoft.Storage"))
         except Exception as e:
             msg = six.text_type(e)
             ex = exception.ProviderRegisterFailure(reason=msg)
@@ -109,38 +97,3 @@ class Azure(object):
             ex = exception.ResourceGroupCreateFailure(reason=msg)
             LOG.exception(msg)
             raise ex
-
-        try:
-            storage_async_operation = self.storage.storage_accounts.create(
-                CONF.azure.resource_group,
-                CONF.azure.storage_account,
-                {
-                    'sku': {'name': 'standard_lrs'},
-                    'kind': 'storage',
-                    'location': CONF.azure.location
-                }
-            )
-            storage_async_operation.wait(CONF.azure.async_timeout)
-            LOG.info(_LI("Create/Update Storage Account"))
-        except exception.CloudError as e:
-            msg = six.text_type(e)
-            if 'StorageAccountAlreadyExists' in msg:
-                LOG.info(_LI('The storage account already exists'))
-            else:
-                ex = exception.StorageAccountCreateFailure(reason=msg)
-                LOG.exception(msg)
-                raise ex
-        except Exception as e:
-            msg = six.text_type(e)
-            ex = exception.StorageAccountCreateFailure(reason=msg)
-            LOG.exception(msg)
-            raise ex
-
-        account_keys = self.storage.storage_accounts.list_keys(
-            CONF.azure.resource_group, CONF.azure.storage_account)
-        key_str = account_keys.keys[0].value
-        self.account = CloudStorageAccount(
-            account_name=CONF.azure.storage_account,
-            account_key=key_str)
-        self.blob = self.account.create_page_blob_service()
-        LOG.info(_LI('Azure Management Clients Initialized'))

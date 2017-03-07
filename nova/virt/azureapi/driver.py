@@ -15,7 +15,6 @@ import netaddr
 import re
 import six
 import time
-
 from nova.compute import arch
 from nova.compute import hv_type
 from nova.compute import power_state
@@ -34,7 +33,6 @@ from nova.volume import cinder
 from oslo_log import log as logging
 from oslo_service import loopingcall
 
-
 CONF = conf.CONF
 LOG = logging.getLogger(__name__)
 VOLUME_CONTAINER = 'volumes'
@@ -45,6 +43,9 @@ AZURE = 'azure'
 USER_NAME = 'azureuser'
 VHD_EXT = 'vhd'
 SNAPSHOT_PREFIX = 'snapshot'
+VOLUME_PREFIX = 'volume'
+INSTANCE_PREFIX = 'instance'
+IMAGE_PREFIX = 'image'
 
 # TODO(haifeng) need complete according to image mapping.
 LINUX_OFFER = ['UbuntuServer', 'RedhatServer']
@@ -67,6 +68,8 @@ class AzureDriver(driver.ComputeDriver):
         super(AzureDriver, self).__init__(virtapi)
         try:
             self.azure = Azure()
+            self.disks = self.azure.compute.disks
+            self.images = self.azure.compute.images
         except Exception as e:
             msg = (_LI("Initialize Azure Adapter failed. reason: %"),
                    six.text_type(e))
@@ -74,9 +77,9 @@ class AzureDriver(driver.ComputeDriver):
             raise nova_ex.NovaException(message=msg)
         self.compute = self.azure.compute
         self.network = self.azure.network
-        self.storage = self.azure.storage
+        # self.storage = self.azure.storage
         self.resource = self.azure.resource
-        self.blob = self.azure.blob
+        # self.blob = self.azure.blob
 
         self._volume_api = cinder.API()
         self._image_api = image.API()
@@ -84,9 +87,9 @@ class AzureDriver(driver.ComputeDriver):
         self.cleanup_time = time.time()
         self.residual_nics = []
 
-    def _get_blob_name(self, name):
-        """Get blob name from volume name"""
-        return '{}.{}'.format(name, VHD_EXT)
+    # def _get_blob_name(self, name):
+    #     """Get blob name from volume name"""
+    #     return '{}.{}'.format(name, VHD_EXT)
 
     def _is_valid_cidr(self, address):
         """Verify that address represents a valid CIDR address.
@@ -108,7 +111,7 @@ class AzureDriver(driver.ComputeDriver):
         ip_segment = address.split('/')
 
         if (len(ip_segment) <= 1 or
-                ip_segment[1] == ''):
+                    ip_segment[1] == ''):
             return False
 
         return True
@@ -119,7 +122,7 @@ class AzureDriver(driver.ComputeDriver):
         net_cidr = CONF.azure.vnet_cidr
         subnet_cidr = CONF.azure.vsubnet_cidr
         if not (self._is_valid_cidr(net_cidr) and
-                self._is_valid_cidr(subnet_cidr)):
+                    self._is_valid_cidr(subnet_cidr)):
             msg = 'Invalid network: %(net_cidr)s/subnet: %(subnet_cidr)s' \
                   ' CIDR' % dict(net_cidr=net_cidr, subnet_cidr=subnet_cidr)
             LOG.error(msg)
@@ -196,18 +199,6 @@ class AzureDriver(driver.ComputeDriver):
         exist needed, and no roll back needed, as anyway we need to create
         these resources.
         """
-
-        try:
-            for i in (VOLUME_CONTAINER, SNAPSHOT_CONTAINER, VHDS_CONTAINER,
-                      IMAGE_CONTAINER):
-                self.blob.create_container(i)
-                LOG.info(_LI("Create/Update Storage Container: %s"), i)
-        except Exception as e:
-            msg = six.text_type(e)
-            LOG.exception(msg)
-            ex = exception.StorageContainerCreateFailure(reason=msg)
-            raise ex
-
         self._precreate_network()
         LOG.info(_LI("Create/Update Ntwork and Subnet, Done."))
 
@@ -279,7 +270,7 @@ class AzureDriver(driver.ComputeDriver):
             LOG.debug('vm info is: {}'.format(vm))
             if vm and hasattr(vm, 'instance_view') and \
                     hasattr(vm.instance_view, 'statuses') and \
-                    vm.instance_view.statuses is not None:
+                            vm.instance_view.statuses is not None:
                 for i in vm.instance_view.statuses:
                     if hasattr(i, 'code') and \
                             i.code and 'PowerState' in i.code:
@@ -369,6 +360,9 @@ class AzureDriver(driver.ComputeDriver):
         }
         return network_profile
 
+    def _get_name_from_id(self, prefix, resource_id):
+        return '{}-{}'.format(prefix, resource_id)
+
     def _get_image_from_mapping(self, image_meta):
         image_name = image_meta.name
         image_ref = constant.IMAGE_MAPPING.get(image_name, None)
@@ -399,7 +393,8 @@ class AzureDriver(driver.ComputeDriver):
         os_type = None
         # 1 from volume, customized image or snapshot
         if 'image_reference' not in storage_profile and \
-                'fromImage' == storage_profile['os_disk']['create_option']:
+                        'fromImage' == storage_profile['os_disk'][
+                    'create_option']:
             os_type = storage_profile['os_disk']['os_type']
 
         # 2 from azure marketplace image
@@ -468,145 +463,110 @@ class AzureDriver(driver.ComputeDriver):
                                  instance, block_device_info):
         # case1 boot from volume(or boot from image to volume).
         if not instance.get('image_ref'):
-            LOG.debug("case1 boot from volume.")
-            device_mapping = driver.block_device_info_get_mapping(
-                block_device_info)
-            root_device_name = \
-                driver.block_device_info_get_root(block_device_info)
-            os_type = uri = volume_size = None
-            for disk in device_mapping:
-                connection_info = disk['connection_info']
-                if root_device_name == disk['mount_device']:
-                    uri = connection_info['data']['vhd_uri']
-                    volume_size = connection_info['data']['vhd_size_gb']
-                    os_type = connection_info['data']['os_type']
-                    break
-            if not (os_type and uri and volume_size):
-                ex = nova_ex.InvalidVolume(
-                    reason='Volume must have os_type/uri/volume_size attribute'
-                           ' when boot from it!')
-                msg = six.text_type(ex)
-                LOG.exception(msg)
-                raise ex
-
-            disk_name = self._get_blob_name(instance.uuid)
-
-            # copy volume to new disk as image for instance.
-            self._copy_blob(VOLUME_CONTAINER, disk_name, uri)
-
-            def _wait_for_copy():
-                """Called at an copy until finish."""
-                copy = self.blob.get_blob_properties(
-                    VOLUME_CONTAINER, disk_name)
-                state = copy.properties.copy.status
-                if state == 'success':
-                    LOG.info(_LI("Copied volume disk to new blob: %s in"
-                                 " Azure."), disk_name)
-                    raise loopingcall.LoopingCallDone()
-                else:
-                    LOG.info(_LI(
-                        'copy volume disk: %(disk)s in Azure Progress '
-                        '%(progress)s'),
-                        dict(disk=disk_name,
-                             progress=copy.properties.copy.progress))
-
-            timer = loopingcall.FixedIntervalLoopingCall(_wait_for_copy)
-            timer.start(interval=0.5).wait()
-
-            volume_blbo_name = uri.split('/')[-1]
-            try:
-                self._delete_blob(VOLUME_CONTAINER, volume_blbo_name)
-            except Exception as e:
-                LOG.exception(_LE("Unabled to delete volume blob"
-                                  " %(disk)s in Azure because %(reason)s"),
-                              dict(disk=volume_blbo_name,
-                                   reason=six.text_type(e)))
-                raise e
-            else:
-                LOG.info(_LI("Delete volume: %s blob in"
-                         " Azure"), volume_blbo_name)
-
-            image_uri = self.blob.make_blob_url(VOLUME_CONTAINER, disk_name)
-
-            storage_profile = {
-                'os_disk': {
-                    'name': instance.uuid,
-                    'caching': 'None',
-                    'create_option': 'fromImage',
-                    'image': {'uri': image_uri},
-                    'vhd': {'uri': uri},
-                    'os_type': os_type
-                }
-            }
-            disk_size_gb = instance.flavor.root_gb
-            # azure don't allow reduce size.
-            if disk_size_gb > volume_size:
-                storage_profile['os_disk']['disk_size_gb'] = disk_size_gb
+            raise NotImplementedError
+            # LOG.debug("case1 boot from volume.")
+            # device_mapping = driver.block_device_info_get_mapping(
+            #     block_device_info)
+            # root_device_name = \
+            #     driver.block_device_info_get_root(block_device_info)
+            # os_type = uri = volume_size = None
+            # for disk in device_mapping:
+            #     connection_info = disk['connection_info']
+            #     if root_device_name == disk['mount_device']:
+            #         uri = connection_info['data']['vhd_uri']
+            #         volume_size = connection_info['data']['vhd_size_gb']
+            #         os_type = connection_info['data']['os_type']
+            #         break
+            # if not (os_type and uri and volume_size):
+            #     ex = nova_ex.InvalidVolume(
+            #         reason='Volume must have os_type/uri/volume_size attribute'
+            #                ' when boot from it!')
+            #     msg = six.text_type(ex)
+            #     LOG.exception(msg)
+            #     raise ex
+            #
+            # disk_name = self._get_blob_name(instance.uuid)
+            #
+            # # copy volume to new disk as image for instance.
+            # self._copy_blob(VOLUME_CONTAINER, disk_name, uri)
+            #
+            # def _wait_for_copy():
+            #     """Called at an copy until finish."""
+            #     copy = self.blob.get_blob_properties(
+            #         VOLUME_CONTAINER, disk_name)
+            #     state = copy.properties.copy.status
+            #     if state == 'success':
+            #         LOG.info(_LI("Copied volume disk to new blob: %s in"
+            #                      " Azure."), disk_name)
+            #         raise loopingcall.LoopingCallDone()
+            #     else:
+            #         LOG.info(_LI(
+            #             'copy volume disk: %(disk)s in Azure Progress '
+            #             '%(progress)s'),
+            #             dict(disk=disk_name,
+            #                  progress=copy.properties.copy.progress))
+            #
+            # timer = loopingcall.FixedIntervalLoopingCall(_wait_for_copy)
+            # timer.start(interval=0.5).wait()
+            #
+            # volume_blbo_name = uri.split('/')[-1]
+            # try:
+            #     self._delete_blob(VOLUME_CONTAINER, volume_blbo_name)
+            # except Exception as e:
+            #     LOG.exception(_LE("Unable to delete volume blob"
+            #                       " %(disk)s in Azure because %(reason)s"),
+            #                   dict(disk=volume_blbo_name,
+            #                        reason=six.text_type(e)))
+            #     raise e
+            # else:
+            #     LOG.info(_LI("Delete volume: %s blob in"
+            #              " Azure"), volume_blbo_name)
+            #
+            # image_uri = self.blob.make_blob_url(VOLUME_CONTAINER, disk_name)
+            #
+            # storage_profile = {
+            #     'os_disk': {
+            #         'name': instance.uuid,
+            #         'caching': 'None',
+            #         'create_option': 'fromImage',
+            #         'image': {'uri': image_uri},
+            #         'vhd': {'uri': uri},
+            #         'os_type': os_type
+            #     }
+            # }
+            # disk_size_gb = instance.flavor.root_gb
+            # # azure don't allow reduce size.
+            # if disk_size_gb > volume_size:
+            #     storage_profile['os_disk']['disk_size_gb'] = disk_size_gb
 
         else:
-            LOG.debug("case2/3/4 boot from image.")
-            image = self._image_api.get(context, image_meta.id)
-            image_properties = image.get('properties', None)
-
-            # case2 boot from azure export images/snapshot.
-            # still can't work now, snapshot problem.
-            if image_properties and 'azure_type' in image_properties:
-                # check image properties for azure export image
-                if image_properties['azure_type'] == AZURE \
-                        and 'azure_uri' in image_properties \
-                        and 'azure_os_type' in image_properties:
-                    LOG.debug("case2 boot from export images/snapshot.")
-                    disk_name = self._get_blob_name(instance.uuid)
-                    image_uri = image['properties']['azure_uri']
-
-                    disk_uri = \
-                        self.blob.make_blob_url(VHDS_CONTAINER, disk_name)
-                    storage_profile = {
-                        'os_disk': {
-                            'name': instance.uuid,
-                            'caching': 'None',
-                            'create_option': 'fromImage',
-                            'image': {'uri': image_uri},
-                            'vhd': {'uri': disk_uri},
-                            'os_type': image_properties['azure_os_type']
-                        }
-                    }
-                else:
-                    ex = nova_ex.ImageUnacceptable(
-                        image_id=image['id'],
-                        reason='Wrong parameters on Azure exported'
-                               ' image/snapshot!')
-                    msg = six.text_type(ex)
-                    LOG.exception(msg)
-                    raise ex
+            LOG.debug("case2/3 boot from image.")
 
             # boot from normal openstack images, mapping to  azure marketplace
             #  or customized image, which has been uploaded to azure.
-            else:
-                image_reference = self._get_image_from_mapping(image_meta)
-                uri = self.blob.make_blob_url(
-                    VHDS_CONTAINER, self._get_blob_name(instance.uuid))
-                storage_profile = {
-                    'os_disk': {
-                        'name': instance.uuid,
-                        'caching': 'None',
-                        'create_option': 'fromImage',
-                        'vhd': {'uri': uri}
-                    }
+            image_reference = self._get_image_from_mapping(image_meta)
+            disk_name = self._get_name_from_id(INSTANCE_PREFIX,
+                                                   instance.uuid)
+            storage_profile = {
+                'os_disk': {
+                    'name': disk_name,
+                    'caching': 'None',
+                    'create_option': 'fromImage',
                 }
+            }
 
-                # case3 boot from customized images
-                if 'uri' in image_reference:
-                    LOG.debug("case3 boot from customized images.")
-                    storage_profile['os_disk']['image'] = {
-                        'uri': image_reference['uri']
-                    }
-                    storage_profile['os_disk']['os_type'] = \
-                        image_reference['os_type']
-                # case4 boot from azure marketplace images
-                else:
-                    LOG.debug("case4 boot from marketplace images.")
-                    storage_profile['image_reference'] = image_reference
+            # case2 boot from customized images
+            if 'uri' in image_reference:
+                LOG.debug("case2 boot from customized images.")
+                storage_profile['os_disk']['image'] = {
+                    'uri': image_reference['uri']
+                }
+                storage_profile['os_disk']['os_type'] = \
+                    image_reference['os_type']
+            # case3 boot from azure marketplace images
+            else:
+                LOG.debug("case3 boot from marketplace images.")
+                storage_profile['image_reference'] = image_reference
 
         return storage_profile
 
@@ -684,13 +644,13 @@ class AzureDriver(driver.ComputeDriver):
             try:
                 self._delete_blob(VOLUME_CONTAINER, instance.uuid)
             except Exception as e:
-                LOG.warning(_LW("Unabled to delete volume tmp blob"
+                LOG.warning(_LW("Unable to delete volume tmp blob"
                                 " %(disk)s in Azure because %(reason)s"),
                             dict(disk=instance.uuid,
                                  reason=six.text_type(e)))
             else:
                 LOG.info(_LI("Delete volume tmp lv: %s blob in"
-                         " Azure"), instance.uuid)
+                             " Azure"), instance.uuid)
 
     def _get_instance(self, instance_uuid):
         try:
@@ -717,7 +677,7 @@ class AzureDriver(driver.ComputeDriver):
                       "...", instance=instance)
             async_vm_action.wait(CONF.azure.async_timeout)
             LOG.info(_LI("Create/Update Instance in Azure"
-                     " Finish."), instance=instance)
+                         " Finish."), instance=instance)
         except exception.AzureMissingResourceHttpError:
             ex = nova_ex.InstanceNotFound(instance_id=instance.uuid)
             msg = six.text_type(ex)
@@ -730,35 +690,63 @@ class AzureDriver(driver.ComputeDriver):
                 reason=msg, instance_uuid=instance.uuid)
             raise ex
 
-    def _copy_blob(self, container, blob_name, source_uri):
-        try:
-            self.blob.copy_blob(container, blob_name, source_uri)
-        except exception.AzureMissingResourceHttpError:
-            ex = exception.BlobNotFound(blob_name=blob_name)
-            msg = six.text_type(ex)
-            LOG.exception(msg)
-            raise ex
-        except Exception as e:
-            msg = six.text_type(e)
-            LOG.exception(msg)
-            ex = exception.BlobCopyFailure(reason=msg,
-                                           blob_name=blob_name,
-                                           source_blob=source_uri)
-            raise ex
+    def _get_name_from_id(self, prefix, resource_id):
+        return '{}-{}'.format(prefix, resource_id)
 
-    def _delete_blob(self, container, blob_name):
+    def _copy_disk(self, disk_name, source_id, size=None):
+        disk_dict = {
+            'location': CONF.azure.location,
+            'creation_data': {
+                'create_option': 'Copy',
+                'source_uri': source_id
+            }
+        }
+        if size:
+            disk_dict['disk_size_gb'] = size
         try:
-            self.blob.delete_blob(container, blob_name)
+            async_action = self.disks.create_or_update(
+                CONF.azure.resource_group,
+                disk_name,
+                disk_dict
+            )
+            async_action.result()
+        except Exception as e:
+            message = (_("Copy disk %(blob_name)s from %(source_id)s in Azure"
+                         " failed. reason: %(reason)s")
+                       % dict(disk_name=disk_name, source_id=source_id,
+                              reason=six.text_type(e)))
+            LOG.exception(message)
+            raise exception.DiskCopyFailure(data=message)
+
+    # def _copy_blob(self, container, blob_name, source_uri):
+    #     try:
+    #         self.blob.copy_blob(container, blob_name, source_uri)
+    #     except exception.AzureMissingResourceHttpError:
+    #         ex = exception.BlobNotFound(blob_name=blob_name)
+    #         msg = six.text_type(ex)
+    #         LOG.exception(msg)
+    #         raise ex
+    #     except Exception as e:
+    #         msg = six.text_type(e)
+    #         LOG.exception(msg)
+    #         ex = exception.BlobCopyFailure(reason=msg,
+    #                                        blob_name=blob_name,
+    #                                        source_blob=source_uri)
+    #         raise ex
+
+    def _delete_disk(self, disk_name):
+        try:
+            self.disks.delete(CONF.azure.resource_group, disk_name)
         except exception.AzureMissingResourceHttpError:
             # refer lvm driver, if volume to delete doesn't exist, return True.
-            message = (_LI("Volume blob: %s does not exist.") % blob_name)
+            message = (_LI("Volume disk: %s does not exist.") % disk_name)
             LOG.info(message)
             return True
         except Exception as e:
             msg = six.text_type(e)
             LOG.exception(msg)
-            ex = exception.BlobDeleteFailure(reason=msg,
-                                             blob_name=blob_name)
+            ex = exception.DiskDeleteFailure(reason=msg,
+                                             disk_name=disk_name)
             raise ex
 
     def _cleanup_instance(self, instance):
@@ -769,12 +757,13 @@ class AzureDriver(driver.ComputeDriver):
         # 1 clean os disk vhd
         # vm = self._get_instance(instance.uuid)
         # os_blob_uri = vm.storage_profile.os_disk.vhd.uri
-        os_blob_name = instance.uuid
+        # os_blob_name = instance.uuid
+        disk_name = self._get_name_from_id(instance.uuid)
         try:
-            self._delete_blob(VHDS_CONTAINER, os_blob_name)
+            self._delete_disk(disk_name)
             LOG.info(_LI("Delete instance's Volume"), instance=instance)
         except Exception as e:
-            LOG.warning(_LW("Unabled to delete blob for instance"
+            LOG.warning(_LW("Unable to delete blob for instance"
                             " %(instance_uuid)s in Azure because %(reason)s"),
                         dict(instance_uuid=instance.uuid,
                              reason=six.text_type(e)))
@@ -787,7 +776,7 @@ class AzureDriver(driver.ComputeDriver):
             async_vm_action.wait(CONF.azure.async_timeout)
             LOG.info(_LI("Delete instance's Interface"), instance=instance)
         except Exception as e:
-            LOG.warning(_LW("Unabled to delete network interface for instance"
+            LOG.warning(_LW("Unable to delete network interface for instance"
                             " %(instance_uuid)s in Azure because %(reason)s"),
                         dict(instance_uuid=instance.uuid,
                              reason=six.text_type(e)))
@@ -960,9 +949,11 @@ class AzureDriver(driver.ComputeDriver):
             msg = 'Can not attach volume, exist volume amount upto 16.'
             LOG.error(msg)
             raise nova_ex.NovaException(msg)
+        disk = self.disks.get(CONF.azure.resource_group, data['disk_name'])
+        managed_disk = dict(id=disk.id)
         data_disk = dict(lun=new_lun,
-                         name=data['vhd_name'],
-                         vhd=dict(uri=data['vhd_uri']),
+                         name=data['disk_name'],
+                         managed_disk=managed_disk,
                          create_option='attach')
         data_disks.append(data_disk)
         self._create_update_instance(instance, vm)
@@ -972,7 +963,7 @@ class AzureDriver(driver.ComputeDriver):
     def detach_volume(self, connection_info, instance, mountpoint,
                       encryption=None):
         """Dettach volume, remove volume info from vm parameters."""
-        vhd_name = connection_info['data']['vhd_name']
+        vhd_name = connection_info['data']['disk_name']
         vm = self._get_instance(instance.uuid)
         data_disks = vm.storage_profile.data_disks
         not_found = True
@@ -989,63 +980,63 @@ class AzureDriver(driver.ComputeDriver):
         LOG.info(_LI("Detach Volume to Instance in Azure finish"),
                  instance=instance)
 
-    def snapshot(self, context, instance, image_id, update_task_state):
-        # TODO(haifeng) when delete snapshot in glance, snapshot blob still
-        # in azure
-        # delete residual snapshots
-        self._cleanup_deleted_snapshots(context)
-        update_task_state(task_state=task_states.IMAGE_PENDING_UPLOAD)
-        snapshot = self._image_api.get(context, image_id)
-        snapshot_name = self._get_snapshot_blob_name_from_id(snapshot['id'])
-        snapshot_url = self.blob.make_blob_url(SNAPSHOT_CONTAINER,
-                                               snapshot_name)
-        vm_osdisk_url = self.blob.make_blob_url(
-            VHDS_CONTAINER, self._get_blob_name(instance.uuid))
-        metadata = {'is_public': False,
-                    'status': 'active',
-                    'name': snapshot['name'],
-                    'disk_format': 'vhd',
-                    'container_format': 'bare',
-                    'properties': {'azure_type': AZURE,
-                                   'azure_uri': snapshot_url,
-                                   'azure_os_type': instance.os_type,
-                                   'kernel_id': instance.kernel_id,
-                                   'image_location': 'snapshot',
-                                   'image_state': 'available',
-                                   'owner_id': instance.project_id,
-                                   'ramdisk_id': instance.ramdisk_id,
-                                   }
-                    }
-        self._copy_blob(SNAPSHOT_CONTAINER, snapshot_name, vm_osdisk_url)
-        LOG.info(_LI("Calling copy os disk in "
-                 "Azure..."), instance=instance)
-        update_task_state(task_state=task_states.IMAGE_UPLOADING,
-                          expected_state=task_states.IMAGE_PENDING_UPLOAD)
-
-        def _wait_for_copy():
-            """Called at an copy until finish."""
-            copy = self.blob.get_blob_properties(SNAPSHOT_CONTAINER,
-                                                 snapshot_name)
-            state = copy.properties.copy.status
-
-            if state == 'success':
-                LOG.info(_LI("Copied osdisk to new blob: %(snapshot_name)s for"
-                             " instance: %(instance)s in Azure."),
-                         {'snapshot_name': snapshot_name,
-                          'instance': instance.uuid})
-                raise loopingcall.LoopingCallDone()
-            else:
-                LOG.debug(
-                    'copy os disk: {} in Azure Progress '
-                    '{}'.format(snapshot_name, copy.properties.copy.progress))
-
-        timer = loopingcall.FixedIntervalLoopingCall(_wait_for_copy)
-        timer.start(interval=0.5).wait()
-
-        LOG.info(_LI('Created Image from Instance: %s in'
-                 ' Azure.'), instance.uuid)
-        self._image_api.update(context, image_id, metadata, 'Azure image')
-        LOG.info(_LI("Update image for snapshot image."), instance=instance)
+    # def snapshot(self, context, instance, image_id, update_task_state):
+    #     # TODO(haifeng) when delete snapshot in glance, snapshot blob still
+    #     # in azure
+    #     # delete residual snapshots
+    #     self._cleanup_deleted_snapshots(context)
+    #     update_task_state(task_state=task_states.IMAGE_PENDING_UPLOAD)
+    #     snapshot = self._image_api.get(context, image_id)
+    #     snapshot_name = self._get_snapshot_blob_name_from_id(snapshot['id'])
+    #     snapshot_url = self.blob.make_blob_url(SNAPSHOT_CONTAINER,
+    #                                            snapshot_name)
+    #     vm_osdisk_url = self.blob.make_blob_url(
+    #         VHDS_CONTAINER, self._get_blob_name(instance.uuid))
+    #     metadata = {'is_public': False,
+    #                 'status': 'active',
+    #                 'name': snapshot['name'],
+    #                 'disk_format': 'vhd',
+    #                 'container_format': 'bare',
+    #                 'properties': {'azure_type': AZURE,
+    #                                'azure_uri': snapshot_url,
+    #                                'azure_os_type': instance.os_type,
+    #                                'kernel_id': instance.kernel_id,
+    #                                'image_location': 'snapshot',
+    #                                'image_state': 'available',
+    #                                'owner_id': instance.project_id,
+    #                                'ramdisk_id': instance.ramdisk_id,
+    #                                }
+    #                 }
+    #     self._copy_blob(SNAPSHOT_CONTAINER, snapshot_name, vm_osdisk_url)
+    #     LOG.info(_LI("Calling copy os disk in "
+    #                  "Azure..."), instance=instance)
+    #     update_task_state(task_state=task_states.IMAGE_UPLOADING,
+    #                       expected_state=task_states.IMAGE_PENDING_UPLOAD)
+    #
+    #     def _wait_for_copy():
+    #         """Called at an copy until finish."""
+    #         copy = self.blob.get_blob_properties(SNAPSHOT_CONTAINER,
+    #                                              snapshot_name)
+    #         state = copy.properties.copy.status
+    #
+    #         if state == 'success':
+    #             LOG.info(_LI("Copied osdisk to new blob: %(snapshot_name)s for"
+    #                          " instance: %(instance)s in Azure."),
+    #                      {'snapshot_name': snapshot_name,
+    #                       'instance': instance.uuid})
+    #             raise loopingcall.LoopingCallDone()
+    #         else:
+    #             LOG.debug(
+    #                 'copy os disk: {} in Azure Progress '
+    #                 '{}'.format(snapshot_name, copy.properties.copy.progress))
+    #
+    #     timer = loopingcall.FixedIntervalLoopingCall(_wait_for_copy)
+    #     timer.start(interval=0.5).wait()
+    #
+    #     LOG.info(_LI('Created Image from Instance: %s in'
+    #                  ' Azure.'), instance.uuid)
+    #     self._image_api.update(context, image_id, metadata, 'Azure image')
+    #     LOG.info(_LI("Update image for snapshot image."), instance=instance)
 
     def resume_state_on_host_boot(self, context, instance, network_info,
                                   block_device_info=None):
@@ -1058,37 +1049,38 @@ class AzureDriver(driver.ComputeDriver):
     def _get_snapshot_blob_name_from_id(self, blob_id):
         return '{}-{}.{}'.format(SNAPSHOT_PREFIX, blob_id, VHD_EXT)
 
-    def _cleanup_deleted_snapshots(self, context):
-        """cleanup deleted resources in silent mode"""
-        try:
-            images = self._image_api.get_all(context)
-            image_ids = [self._get_snapshot_blob_name_from_id(i['id']) for i in
-                         images]
-            snapshot_blobs = self.blob.list_blobs(SNAPSHOT_CONTAINER)
-        except Exception as e:
-            LOG.warning(_LW("Unabled to delete snapshot"
-                            " in Azure because %(reason)s"),
-                        dict(reason=six.text_type(e)))
-            return
-
-        blob_ids = [i.name for i in snapshot_blobs]
-        residual_ids = set(blob_ids) - set(image_ids)
-        if not residual_ids:
-            LOG.info(_LI('No residual snapshots in Azure'))
-            return
-        for i in residual_ids:
-            try:
-                self._delete_blob(SNAPSHOT_CONTAINER, i)
-            except Exception as e:
-                LOG.warning(_LW("Unabled to delete snapshot %(snapshot)s"
-                                "in Azure because %(reason)s"),
-                            dict(snapshot=i,
-                                 reason=six.text_type(e)))
-            else:
-                LOG.info(_LI('Delete residual snapshot: %s blob in Azure'),
-                         i)
-        else:
-            LOG.info(_LI('Delete all residual snapshots in Azure'))
+    # def _cleanup_deleted_snapshots(self, context):
+    #     """cleanup deleted resources in silent mode"""
+    #     try:
+    #         images = self._image_api.get_all(context)
+    #         image_ids = [self._get_name_from_id(IMAGE_PREFIX, i['id']) for i in
+    #                      images]
+    #         snapshots = self.images.list_by_resource_group(
+    #             CONF.azure.resource_group)
+    #     except Exception as e:
+    #         LOG.warning(_LW("Unable to delete snapshot"
+    #                         " in Azure because %(reason)s"),
+    #                     dict(reason=six.text_type(e)))
+    #         return
+    #
+    #     snapshot_ids = [i.name for i in snapshots]
+    #     residual_ids = set(snapshot_ids) - set(image_ids)
+    #     if not residual_ids:
+    #         LOG.info(_LI('No residual snapshots in Azure'))
+    #         return
+    #     for i in residual_ids:
+    #         try:
+    #             self.images.delete(CONF.azure.resource_group, i)
+    #         except Exception as e:
+    #             LOG.warning(_LW("Unable to delete snapshot %(snapshot)s"
+    #                             "in Azure because %(reason)s"),
+    #                         dict(snapshot=i,
+    #                              reason=six.text_type(e)))
+    #         else:
+    #             LOG.info(_LI('Delete residual snapshot: %s in Azure'),
+    #                      i)
+    #     else:
+    #         LOG.info(_LI('Delete all residual snapshots in Azure'))
 
     def _cleanup_deleted_nics(self):
         """cleanup deleted resources in silent mode
@@ -1116,7 +1108,7 @@ class AzureDriver(driver.ComputeDriver):
                     CONF.azure.resource_group, i
                 )
             except Exception as e:
-                LOG.warning(_LW("Unabled to delete network_interfaces "
+                LOG.warning(_LW("Unable to delete network_interfaces "
                                 "%(nic)s in Azure because %(reason)s"),
                             dict(nic=i,
                                  reason=six.text_type(e)))
@@ -1126,6 +1118,9 @@ class AzureDriver(driver.ComputeDriver):
         else:
             LOG.info(_LI('Delete all residual Nics in Azure'))
 
+    def _is_os_disk(self, name):
+        return INSTANCE_PREFIX == name[:7]
+
     def _cleanup_deleted_os_disks(self):
         """cleanup deleted resources in silent mode
 
@@ -1133,29 +1128,28 @@ class AzureDriver(driver.ComputeDriver):
         properties.lease.state of blob.
         """
         try:
-            blobs = self.blob.list_blobs(VHDS_CONTAINER)
+            disks = self.disks.list_by_resource_group(
+                CONF.azure.resource_group)
         except Exception as e:
-            LOG.warning(_LW("Unabled to delete disks"
+            LOG.warning(_LW("Unable to delete disks"
                             " in Azure because %(reason)s"),
                         dict(reason=six.text_type(e)))
             return
         # blobs is and iterable obj, although it's empty.
-        if not blobs:
-            LOG.info(_LI('No residual Blob in Azure'))
+        if not disks:
+            LOG.info(_LI('No residual Disk in Azure'))
             return
-        for i in blobs:
-            if 'unlocked' == i.properties.lease.status \
-                    and 'available' == i.properties.lease.state \
-                    and VHD_EXT in i.name:
+        for i in disks:
+            if self._is_os_disk(i.name) and not i.owner_id:
                 try:
-                    self._delete_blob(VHDS_CONTAINER, i.name)
+                    self.disks.delete(CONF.azure.resource_group, i.name)
                 except Exception as e:
-                    LOG.warning(_LW("Unabled to delete os disk %(disk)s"
+                    LOG.warning(_LW("Unable to delete os disk %(disk)s"
                                     "in Azure because %(reason)s"),
                                 dict(disk=i.name,
                                      reason=six.text_type(e)))
                 else:
-                    LOG.info(_LI("Delete residual os disk: %s blob in"
-                             " Azure"), i.name)
+                    LOG.info(_LI("Delete residual os disk: %s in"
+                                 " Azure"), i.name)
         else:
             LOG.info(_LI('Delete all residual disks in Azure'))

@@ -123,13 +123,13 @@ class NetworkInterfaceDeleteFailure(exception.NovaException):
                 " %(instance_uuid)s in Azure because %(reason)s")
 
 
-class BlobCopyFailure(exception.NovaException):
-    msg_fmt = _("Unabled to copy blob %(blob_name)s from %(source_blob)s"
+class DiskCopyFailure(exception.NovaException):
+    msg_fmt = _("Unabled to copy disk %(disk_name)s from %(source_id)s"
                 " in Azure because %(reason)s")
 
 
-class BlobDeleteFailure(exception.NovaException):
-    msg_fmt = _("Unabled to delete blob %(blob_name)s"
+class DiskDeleteFailure(exception.NovaException):
+    msg_fmt = _("Unabled to delete blob %(disk_name)s"
                 " in Azure because %(reason)s")
 
 

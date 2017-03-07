@@ -60,19 +60,23 @@ $vi /etc/cinder/cinder-volume.conf
 
 [DEFAULT]
 #enabled_backends = lvmdriver-1
-enabled_backends = azure
+enabled_backends = azure_hdd,azure_ssd
 
 [azure]
-volume_driver = cinder.volume.drivers.azure.driver.AzureDriver
-volume_backend_name = azure
 location = westus
 resource_group = ops_resource_group
-storage_account = ops0storage0account
 subscription_id = 62257576-b9df-484a-b643-2df9ce9e7086
 username = xxxxxx@yanhevenoutlook.onmicrosoft.com
 password = xxxxxx
-azure_storage_container_name = volumes
 azure_total_capacity_gb = 500000
+
+[azure_hdd]
+volume_driver = cinder.volume.drivers.azure.driver.AzureDriver
+volume_backend_name = azure_hdd
+
+[azure_ssd]
+volume_driver = cinder.volume.drivers.azure.driver.AzureDriver
+volume_backend_name = azure_ssd
 
 $/usr/local/bin/cinder-volume --config-file /etc/cinder/cinder-volume.conf  & echo ! >/opt/stack/status/stack/c-vol.pid; fg || echo "c-vol failed to start" | tee "/opt/stack/status/stack/c-vol.failure"
 ```
@@ -92,12 +96,9 @@ backup_driver = cinder.backup.drivers.azure_backup
 [azure]
 location = westus
 resource_group = ops_resource_group
-storage_account = ops0storage0account
 subscription_id = 62257576-b9df-484a-b643-2df9ce9e7086
 username = xxxxxx@yanhevenoutlook.onmicrosoft.com
 password = xxxxxx
-azure_volume_container_name = volumes
-azure_backup_container_name = backups
 
 $/usr/local/bin/cinder-backup --config-file /etc/cinder/cinder-backup.conf & echo $! >/opt/stack/status/stack/c-bac.pid; fg || echo "c-bac failed to start" | tee "/opt/stack/status/stack/c-bac.failure"
 ```

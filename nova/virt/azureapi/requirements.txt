@@ -3,5 +3,5 @@ azure-mgmt-storage==0.30.0rc5
 azure-mgmt-network==0.30.0rc5
 azure-mgmt-compute==0.30.0rc5
 azure-storage==0.33.0
-msrest
-msrestazure
+msrest==0.4.6
+msrestazure==0.4.7

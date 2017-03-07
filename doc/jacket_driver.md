@@ -183,33 +183,30 @@ _cleanup_incomplete_migrations||不支持migration
 
 ### Jacket Cinder API
 ####说明
-OpenStack里面的volume对应azure里面是Storage里面的Page Blog,包括创建VM时指定的操作系统盘,额外挂载的数据盘,存储镜像,从VM导出的镜像,快照都是它.
-在名为ops_resource_group的resource group 下面创建名为ops0storage0account的storage account, 用0分隔单词是因为它只接受字母与数据。
-创建如下几个container:
-- volumes: volume, backup创建在这里
-- snapshots: 创建的snapshots在这里
-- images: 用户自制镜像上传到这里
-- vhds: 平台自动创建,用来存放VM的系统磁盘.不能动平台自动创建的任何blob.
+OpenStack里面与azure里面Managed Disk的disk, snapshot, image的对应关系如下:
+- volume--Managed Disk disk
+- volume snapshot--Managed Disk snapshot
+- image--Managed Disk image
+
+Azure的managed disk 有两种类型,对应HDD 和 SSD,在cinder-volume的配置里配置两种backend
+azure_hdd和azure_ssd对应.
+
 
 卷特别说明:
-- 容量是512B倍数,最大为1023GB.但由于VM最小接受磁盘容量是1GB,所以这里也建议最小可创建容量为1GB(是站在虚拟机操作系统里看到的大小，blog应该是1GB+512Byte).
-- VM挂载磁盘必须是以vhd结尾的page blob,而且是标准的VHD格式文件,固定大小的VHD.
-- VHD格式在文件最后512字节是格式内容，创建空page blob时把最后512字节按VHD格式要求写入内容。
-- 从volume/snapshot创建volume，只能是以原来的大小创建，因为对应在azure是一个page blob, 里面是VHD文件,虽然page blob可以修改大小,但修改大小只是改变azure平台为你分配的空间,并未修改VHD文件内容,所以这个VHD在挂载使用时,还是原来的大小.
 - 一个VM只能挂载一块额外数据盘.在操作系统里面看到设备号,至少是第三块设备,因为azure会在创建VM时,除了系统磁盘外,还会挂载一块临时磁盘,官方文档明确不要写数据到临时磁盘.
 
 映射关系：  
 Volume:  
 Openstack: volume:{'display_name':'testvolume', 'id': '17d95073-1ab7-4906-9518-6e09312f1655', 'name': 'volume-17d95073-1ab7-4906-9518-6e09312f1655'}  
-Azure: page blob:{'name': 'volume-17d95073-1ab7-4906-9518-6e09312f1655.vhd'}
+Azure: Managed Disk disk:{'name': 'volume-17d95073-1ab7-4906-9518-6e09312f1655'}
 
 Snapshot:  
-Openstack: snapshot:{'volume': Volume(), 'metadata': {'azure_snapshot_id': "2016-11-09T14:11:07.6175300Z"}} 其中metadata信息是创建快照后在驱动实现方法处更新snapshot数据库记录。  
-Azure: page blog:{'name': 'volume-17d95073-1ab7-4906-9518-6e09312f1655.vhd', 'snapshot': '2016-11-09T14:11:07.6175300Z'}  
+Openstack: snapshot:{'volume': Volume(), 'metadata': {'azure_snapshot_id': "snapshot-17d95073-1ab7-4906-9518-6e09312f1655"}} 其中metadata信息是创建快照后在驱动实现方法处更新snapshot数据库记录。  
+Azure: Managed Disk snapshot:{'name': 'snapshot-17d95073-1ab7-4906-9518-6e09312f1655'}  
 
 Backup:
 Openstack: volume:{'display_name':'testvolume', 'id': '17d95073-1ab7-4906-9518-6e09312f1655', 'name': 'backup-17d95073-1ab7-4906-9518-6e09312f1655'}
-Azure: page blob:{'name': 'backup-17d95073-1ab7-4906-9518-6e09312f1655.vhd'}
+Azure:  Managed Disk snapshot:{'name': 'backup-17d95073-1ab7-4906-9518-6e09312f1655'}
 
 |Category|API|Azure
 |:--|:--|:--
@@ -217,22 +214,22 @@ Azure: page blob:{'name': 'backup-17d95073-1ab7-4906-9518-6e09312f1655.vhd'}
 ||Show API version details|volume driver管理不了,发行软件时指定
 |API extensions (extensions)|List API extensions|volume driver管理不了,查询DB
 |Limits (limits)|Show absolute limits|volume driver管理不了,查询DB,但可以查看azure里面的limit,进行配置.
-|Volumes (volumes)|Create volume|Azure api: Copy Blob 实现细节：创建容量为size_Byte + 512 Byte的page blog,然后更新它的最后512字节为VHD格式内容。
+|Volumes (volumes)|Create volume|描述在volume_driver_design.md
 ||List volumes||volume driver管理不了,查询DB
 ||List volumes (detailed)|volume driver管理不了,查询DB
 ||Show volume information|volume driver管理不了,查询DB
 ||Update volume|volume driver管理不了,更新DB操作
-||Delete volume|Azure api: Put Page  实现细节: 通过映射关系,找到azure上某个快照的blob,执行删除操作.
+||Delete volume|描述在volume_driver_design.md
 |Volume actions (volumes, action)|Reset volume statuses|volume driver管理不了,更新DB操作
 ||Set image metadata for volume|volume driver管理不了,更新DB操作:self.db.volume_metadata_update
 ||Remove image metadata from volume|volume driver管理不了,更新DB操作:self.db.volume_metadata_delete
-||Attach volume|Azure api: Create or update a VM  实现细节: 更新VM信息时带上要挂载的volume的blob uri.'data_disk'。
-|Backups (backups)|Create backup|Azure api: Copy Blob  实现细节:复制volume的page到新的page,作为backup,volume所有快照都会连带，做到真正是备份。
+||Attach volume|Azure api: Create or update a VM  实现细节: 更新VM信息时带上要挂载的volume的disk id。
+|Backups (backups)|Create backup|描述在volume_driver_design.md
 ||List backups|volume driver管理不了,查询DB
 ||List backups (detailed)|volume driver管理不了,查询DB
 ||Show backup details|volume driver管理不了,查询DB
-||Delete backup|Azure api: Put Page  实现细节: 通过映射关系,找到azure上某个快照的blob,执行删除操作.
-||Restore backup|Azure api: Copy Blob  实现细节: 复制backup到已经存在的volume，azure是完全覆盖。
+||Delete backup|描述在volume_driver_design.md
+||Restore backup|描述在volume_driver_design.md
 |Backup actions (backups, action)|Force-delete backup|同删除backup
 |Quota sets extension (os-quota-sets)|Show quotas|volume driver管理不了,查询DB
 ||Update quotas|volume driver管理不了,更新DB
@@ -248,12 +245,12 @@ Azure: page blob:{'name': 'backup-17d95073-1ab7-4906-9518-6e09312f1655.vhd'}
 ||Update extra specs for a volume type|volume driver管理不了,更新DB
 ||Show volume type information|volume driver管理不了,查询DB
 ||Delete volume type|volume driver管理不了,更新DB
-|Volume snapshots (snapshots)|Create snapshot|Azure api: Snapshot Blob  实现细节: 在azure上创建快照
+|Volume snapshots (snapshots)|Create snapshot|描述在volume_driver_design.md
 ||List snapshots|volume driver管理不了,查询DB
 ||List snapshots (detailed)|volume driver管理不了,查询DB
 ||Show snapshot information|volume driver管理不了,查询DB
 ||Update snapshot|volume driver管理不了,更新DB
-||Delete snapshot|Azure api: Put Page  实现细节: 跟删除卷一样处理.通过映射关系,找到azure上某个快照的blob,执行删除操作.
+||Delete snapshot|描述在volume_driver_design.md
 ||Show snapshot metadata|volume driver管理不了,查询DB
 ||Update snapshot metadata|volume driver管理不了,更新DB
 |Volume image metadata extension (os-vol-image-meta)|Show image metadata for volume|volume driver管理不了,查询DB
@@ -275,13 +272,5 @@ Azure: page blob:{'name': 'backup-17d95073-1ab7-4906-9518-6e09312f1655.vhd'}
 ###局限说明
 |API|Constrains
 |:--|:--
-|从非azure镜像市场的镜像创建虚拟机|不支持修改登陆密码,目前只能在azure portal进行密码修改, 同样虚拟机创建后,也无法修改密码,密码为原镜像密码.
-|从镜像/卷/快照/创建卷|大小只能跟源镜像/卷/快照一样,不支持修改大小,创建过程会将新创建卷的大小修改为源大小,然后打日志说明不支持修改大小
+|从镜像/卷/快照/创建卷|只能扩大容量,不能缩小容量
 |删除快照|在azure上面的快照,只能本用户在一下次创建快照时才对之前删除的快照进行移除,因为要调用到glance的接口,要有context,所以无法加入到定期任务中
-||
-
-###卷更改大小的一些探索和思路
-- 跟空白卷创建时类似,针对现有的卷,自己构造要扩容后填充VHD作为元数据的最后512字节,可能要考虑到当前卷是有内容的.
-- azure官方的操作指南,关于挂载到VM的磁盘,是可以改变它的大小的, 在更新VM接口,填入要扩容后的磁盘容量大小, azure会对磁盘进行扩容.但这种做法依赖于VM.  
-- 通过下载这个VHD,然后使用微软的VHD工具进行扩容,然后再上传.  
-- 微软azure powershell 可以对老版azure资源管理器创建的blob进行扩容,https://blogs.msdn.microsoft.com/madan/2015/11/02/resizing-azure-vm-os-or-data-disk/, 但是不能对新版扩容,新版的只能在portal处对已经挂载到vm的blob进行修改大小来进行扩容.https://blogs.msdn.microsoft.com/madan/2016/09/28/resize-azure-resource-manager-arm-vm-os-data-disk-using-azure-portal/  

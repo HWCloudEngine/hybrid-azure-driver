@@ -10,78 +10,87 @@ Azure api: List Containers, List Blobs
 实现细节: 服务启动时执行上面两个调用操作,看配置是否正常,能与azure通信.
 
 ####3 create_volume
-Azure api: Put Page    
-实现细节: 指定要创建的卷的大小,512byte的倍数,最大1TB.没有ID,只能通过container_name和blob_name来对卷进行定位.所以要把azure卷信息添加到volume,目前看到可以放到provider_id.
+Azure api: Managed Disk里面的disk create_or_update, 创建空disk   
+实现细节: 指定大小,create_option=empty
 
 ####4 create_volume_from_snapshot
-Azure api: Copy Blob    
-实现细节: 要把azure blob信息添加到volume,放到provider_id.
+Azure api: Managed Disk里面的disk create_or_update, 从快照创建disk   
+实现细节: 指定源ID, create_option=copy
 
 ####5 create_cloned_volume
-AAzure api: Copy Blob  
-实现细节: 要把azure blob信息添加到volume,放到provider_id.
+Azure api: Managed Disk里面的disk create_or_update, 从现有disk创建disk   
+实现细节: 指定源ID, create_option=copy
 
 ####6 extend_volume
-Azure api: Put Page  
-实现细节: 需要调整VHD文件大小,对VHD文件格式部分进行修改,这个流程很复杂,暂时不实现.
+Azure api: Managed Disk里面的disk create_or_update 
+实现细节: 提供扩容后的大小,更新
 
 ####7 delete_volume
-Azure api: Put Page  
-实现细节: 通过映射关系,找到azure上某个快照的blob,执行删除操作.
+Azure api: Managed Disk里面的disk delete 
+实现细节: 通过映射关系,执行删除操作.
 
 ####8 create_snapshot
-Azure api: Snapshot Blob  
-实现细节: 在azure上创建快照,然后把新创建的快照映射到openstack里面的卷快照,与卷的创建类似.
+Azure api: Managed Disk里面的snapshot create_or_update, 从现有disk创建disk   
+实现细节: 指定源ID, create_option=copy
 
 ####9 delete_snapshot
-Azure api: Delete Blob  
-实现细节: 通过映射关系,找到azure上某个快照的blob,执行删除操作.
+Azure api: Managed Disk里面的snapshot delete 
+实现细节: 通过映射关系,执行删除操作.
 
 ####10 get_volume_stats
-Azure api:  Get Blob  
-实现细节: 通过映射关系,找到azure上的blob,获取详细信息,最后做键值转换.
+Azure api:  无
+实现细节: managed disk资源没有限制容量
 
 ####11 create_export
 Azure api:  无  
-实现细节: 无法实现
+实现细节: 按设计不用实现
 
 ####12 ensure_export
 Azure api: 无  
-实现细节: 无法实现
+实现细节: 按设计不用实现
 
 ####13 remove_export
 Azure api: 无  
-实现细节: 无法实现
+实现细节: 按设计不用实现
 
 ####14 initialize_connection
 Azure api: 无    
-实现细节: 无须在azure上操作,返回原先存储在volume对象上的azure blob的信息.
+实现细节: 无须在azure上操作,返回原先存储在volume对象上的信息.
 
 ####15 terminate_connection
 Azure api: 无  
-实现细节: 无法实现
+实现细节: 按设计不用实现
 
-####16 copy_volume_to_image
-Azure api: Copy Blob  
-实现细节: 直接把volume所在的blob进行复制到image blob, 命名规则按images命名规则来.
-复制卷到镜像,不能指定镜像格式等属性,只能与卷完全一样.读取卷的"os_type"信息和大小写入到
-镜像的"azure_image_size_gb"属性里.
+####16 copy_volume_to_image(待定)
+Azure api: Managed Disk里面的image create_or_update,
+实现细节: 指定源ID, create_option=copy
+
 
 ####17 copy_image_to_volume
-Azure api: Copy Blob  
+Azure api: 无
 实现细节: 全部放到clone_image实现,不用到这一步实现
 
 ####18 validate_connector
 Azure api:  无  
 实现细节: 检查配置文件读取的azure storage认证连接信息是否正常.
 
-####19 clone_image
-Azure api: Copy Blob  
-实现细节: 镜像提前上传到azure上,名为images的container里面,命名规则为"image-{image_id}.vhd",
-
-创建卷时直接从镜像的blob复制一个新的blob,大小不能改变.在openstack里面的镜像要添加os_type到其property里面,
-创建卷时会读取这个值,将来通过卷创建虚拟机时要用到.还有"azure_image_size_gb",在openstac创建空镜像时要填写在azuer上面映射
-镜像的大小.
+####19 clone_image(待定)
+Azure api: Managed Disk里面的disk create_or_update,
+实现细节: 指定源ID, create_option=copy
 
 ####20 retype
-azure没有相关的接口来更改卷的属性,不实现.
+Azure api: Managed Disk里面的disk create_or_update,
+实现细节: 指定新的类型(对应是hdd, ssd)
+
+####21 back
+Azure api: Managed Disk里面的snapshot create_or_update,
+实现细节: 指定源ID, create_option=copy
+
+####22 restore
+Azure api: Managed Disk里面的disk create_or_update,
+实现细节: 指定源ID, create_option=copy, 由于不能复制到已有的disk,所以
+先对当前卷打快照(为了恢复失败可以回滚),然后删除当前卷,再从备份生成卷.
+
+####23 delete_backup
+Azure api: Managed Disk里面的snapshot delete 
+实现细节: 通过映射关系,执行删除操作.

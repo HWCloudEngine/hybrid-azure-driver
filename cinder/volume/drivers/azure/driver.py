@@ -13,42 +13,39 @@
 
 from oslo_config import cfg
 from oslo_log import log as logging
-from oslo_service import loopingcall
-from oslo_utils import units
 import six
 
 from azure.common import AzureMissingResourceHttpError
+from azure.mgmt.compute.models import DiskCreateOption
+from azure.mgmt.compute.models import StorageAccountTypes
 from cinder import exception
 from cinder.i18n import _, _LE, _LI, _LW
 from cinder.image import image_utils
 from cinder.volume import driver
 from cinder.volume.drivers.azure.adapter import Azure
-from cinder.volume.drivers.azure import vhd_utils as azutils
-
+from cinder.volume.drivers.azure.adapter import volume_opts as ad_opts
 
 LOG = logging.getLogger(__name__)
 
 volume_opts = [
-    cfg.StrOpt('azure_storage_container_name',
-               default='volumes',
-               help='Azure Storage Container Name'),
-    cfg.StrOpt('azure_image_container_name',
-               default='images',
-               help='Azure Image Container Name'),
     cfg.IntOpt('azure_total_capacity_gb',
                help='Total capacity in Azuer, in GB',
                default=500000)
 ]
 
+volume_opts.extend(ad_opts)
 CONF = cfg.CONF
 CONF.register_opts(volume_opts)
 VHD_EXT = 'vhd'
 IMAGE_PREFIX = 'image'
+SNAPSHOT_PREFIX = 'snapshot'
+VOLUME_PREFIX = 'volume'
 
 
 class AzureDriver(driver.VolumeDriver):
-    """Executes commands relating to Volumes."""
+    """Executes commands relating to Volumes.
 
+    all reference about 'disk' is 'managed disk' in Azure."""
     VERSION = '0.33.0'
 
     def __init__(self, vg_obj=None, *args, **kwargs):
@@ -59,17 +56,9 @@ class AzureDriver(driver.VolumeDriver):
 
         try:
             self.azure = Azure()
-        except Exception as e:
-            message = (_("Initialize Azure Adapter failed. reason: %s")
-                       % six.text_type(e))
-            LOG.exception(message)
-            raise exception.VolumeBackendAPIException(data=message)
-        self.blob = self.azure.blob
-        try:
-            self.blob.create_container(
-                self.configuration.azure_storage_container_name)
-            self.blob.create_container(
-                self.configuration.azure_image_container_name)
+            self.disks = self.azure.compute.disks
+            self.snapshots = self.azure.compute.snapshots
+            self.images = self.azure.compute.images
         except Exception as e:
             message = (_("Initialize Azure Adapter failed. reason: %s")
                        % six.text_type(e))
@@ -102,103 +91,94 @@ class AzureDriver(driver.VolumeDriver):
             self._stats = data
         return self._stats
 
-    def _get_blob_name(self, name):
-        """Get blob name from volume name"""
-        return '{}.{}'.format(name, VHD_EXT)
+    def _get_name_from_id(self, prefix, resource_id):
+        return '{}-{}'.format(prefix, resource_id)
 
-    def _copy_blob(self, blob_name, source_uri, container_name=None):
-        if not container_name:
-            container_name = self.configuration.azure_storage_container_name
+    def _copy_disk(self, disk_name, source_id, azure_type, size=None):
+        disk_dict = {
+            'location': self.configuration.location,
+            'account_type': azure_type,
+            'creation_data': {
+                'create_option': DiskCreateOption.copy,
+                'source_uri': source_id
+            }
+        }
+        if size:
+            disk_dict['disk_size_gb'] = size
         try:
-            self.blob.copy_blob(
-                container_name,
-                blob_name, source_uri)
-        except Exception as e:
-            message = (_("Copy blob %(blob_name)s from %(source_uri)s in Azure"
-                         " failed. reason: %(reason)s")
-                       % dict(blob_name=blob_name, source_uri=source_uri,
-                              reason=six.text_type(e)))
-            LOG.exception(message)
-            raise exception.VolumeBackendAPIException(data=message)
-
-    def _check_exist(self, blob_name, snapshot=None, container_name=None):
-        if not container_name:
-            container_name = self.configuration.azure_storage_container_name
-        try:
-            exists = self.blob.exists(
-                container_name,
-                blob_name,
-                snapshot=snapshot
+            async_action = self.disks.create_or_update(
+                self.configuration.resource_group,
+                disk_name,
+                disk_dict
             )
+            async_action.result()
         except Exception as e:
-            message = (_("Check blob exist %(blob_name)s in Azure failed."
-                         " reason: %(reason)s")
-                       % dict(blob_name=blob_name,
+            message = (_("Copy disk %(blob_name)s from %(source_id)s in Azure"
+                         " failed. reason: %(reason)s")
+                       % dict(blob_name=disk_name, source_id=source_id,
                               reason=six.text_type(e)))
-            if snapshot:
-                message = (_("Check snapshot %(snapshot)s exist for blob"
-                             " %(blob_name)s in Azure failed. reason: %("
-                             "reason)s")
-                           % dict(snapshot=snapshot, blob_name=blob_name,
-                                  reason=six.text_type(e)))
             LOG.exception(message)
             raise exception.VolumeBackendAPIException(data=message)
-        else:
-            return exists
 
     def create_volume(self, volume):
-        size = volume.size * units.Gi
-        blob_size = size + 512
-        blob_name = self._get_blob_name(volume.name)
-        LOG.debug("Calling Create Volume '{}' in Azure ..."
-                  .format(volume.name))
-        vhd_footer = azutils.generate_vhd_footer(size)
+        azure_type = StorageAccountTypes.premium_lrs \
+            if 'azure_ssd' == volume.volume_type.name \
+            else StorageAccountTypes.standard_lrs
+        disk_name = self._get_name_from_id(VOLUME_PREFIX, volume.id)
+        disk_dict = {
+            'location': self.configuration.location,
+            'account_type': azure_type,
+            'creation_data': {
+                'create_option': DiskCreateOption.empty,
+            },
+            'disk_size_gb': volume.size
+        }
+        LOG.debug("Calling Create Disk '{}' in Azure ..."
+                  .format(disk_name))
         try:
-            # 1 create an empty blob
-            self.blob.create_blob(
-                self.configuration.azure_storage_container_name,
-                blob_name, blob_size)
-            # 2 update blob with vhd footer, then it could be used as vhd disk.
-            self.blob.update_page(
-                self.configuration.azure_storage_container_name,
-                blob_name, vhd_footer,
-                start_range=size, end_range=blob_size - 1)
+            async_action = self.disks.create_or_update(
+                self.configuration.resource_group,
+                disk_name,
+                disk_dict
+            )
+            async_action.result()
         except Exception as e:
             try:
-                self.blob.delete_blob(
-                    self.configuration.azure_storage_container_name,
-                    blob_name)
+                self.disks.delete(
+                    self.configuration.resource_group,
+                    disk_name
+                )
             except Exception:
-                LOG.error(_LE('Delete blob %s after create failure failed'),
-                          blob_name)
-            message = (_("Create Volume %(volume)s in Azure failed. reason: "
+                LOG.error(_LE('Delete Disk %s after create failure failed'),
+                          volume.name)
+            message = (_("Create Disk %(volume)s in Azure failed. reason: "
                          "%(reason)s") %
-                       dict(volume=volume.name, reason=six.text_type(e)))
+                       dict(volume=disk_name, reason=six.text_type(e)))
             LOG.exception(message)
             raise exception.VolumeBackendAPIException(data=message)
-        else:
-            LOG.info(_LI('Created Volume : %s in Azure.'), volume.name)
+        LOG.info(_LI('Created Disk : %s in Azure.'), disk_name)
 
     def delete_volume(self, volume):
-        blob_name = self._get_blob_name(volume.name)
-        LOG.debug("Calling Delete Volume '{}' in Azure ..."
-                  .format(volume.name))
+        disk_name = self._get_name_from_id(VOLUME_PREFIX, volume.id)
+        LOG.debug("Calling Delete Disk '{}' in Azure ..."
+                  .format(disk_name))
         try:
-            self.blob.delete_blob(
-                self.configuration.azure_storage_container_name,
-                blob_name, delete_snapshots='include')
+            async_action = self.disks.delete(
+                self.configuration.resource_group,
+                disk_name
+            )
+            async_action.result()
         except AzureMissingResourceHttpError:
             # refer lvm driver, if volume to delete doesn't exist, return True.
-            message = (_("Volume blob: %s does not exist.") % volume.name)
+            message = (_("Disk: %s does not exist.") % disk_name)
             LOG.info(message)
         except Exception as e:
-            message = (_("Delete Volume %(volume)s in Azure failed. reason: "
+            message = (_("Delete Disk %(volume)s in Azure failed. reason: "
                          "%(reason)s") %
-                       dict(volume=volume.name, reason=six.text_type(e)))
+                       dict(volume=disk_name, reason=six.text_type(e)))
             LOG.exception(message)
             raise exception.VolumeBackendAPIException(data=message)
-        else:
-            LOG.info(_LI("Delete Volume %s in Azure finish."), volume.name)
+        LOG.info(_LI("Delete Disk %s in Azure finish."), disk_name)
 
     def remove_export(self, context, volume):
         pass
@@ -215,9 +195,9 @@ class AzureDriver(driver.VolumeDriver):
 
         inorder to let backup process skip some useless steps
         """
-        blob_name = self._get_blob_name(volume.name)
-        vhd_uri = self.blob.make_blob_url(
-            self.configuration.azure_storage_container_name, blob_name)
+        # blob_name = self._get_blob_name(volume.name)
+        # vhd_uri = self.blob.make_blob_url(
+        #     self.configuration.azure_storage_container_name, blob_name)
         metadata = volume.get('volume_metadata', [])
         metadata_dict = {item['key']: item['value'] for item in metadata}
         os_type = metadata_dict.get('os_type')
@@ -225,7 +205,7 @@ class AzureDriver(driver.VolumeDriver):
             'driver_volume_type': 'local',
             'data': {'volume_name': volume.name,
                      'volume_id': volume.id,
-                     'vhd_uri': vhd_uri,
+                     # 'vhd_uri': vhd_uri,
                      'vhd_size_gb': volume.size,
                      'vhd_name': volume.name,
                      'device_path': None,
@@ -241,33 +221,50 @@ class AzureDriver(driver.VolumeDriver):
         pass
 
     def create_snapshot(self, snapshot):
+        disk_name = self._get_name_from_id(
+            VOLUME_PREFIX, snapshot['volume_id'])
+        snapshot_name = self._get_name_from_id(
+            SNAPSHOT_PREFIX, snapshot['id'])
         try:
-            snapshot_blob = self.blob.snapshot_blob(
-                self.configuration.azure_storage_container_name,
-                self._get_blob_name(snapshot['volume_name'])
+            source_disk = self.disks.get(
+                self.configuration.resource_group,
+                disk_name
             )
+            snapshot_dict = {
+                'location': self.configuration.location,
+                'creation_data': {
+                    'create_option': DiskCreateOption.copy,
+                    'source_uri': source_disk.id
+                }
+            }
+            async_action = self.snapshots.create_or_update(
+                self.configuration.resource_group,
+                snapshot_name,
+                snapshot_dict
+            )
+            async_action.result()
         except Exception as e:
             message = (_("Create Snapshop %(volume)s in Azure failed. reason: "
                          "%(reason)s")
-                       % dict(volume=snapshot['volume_name'],
+                       % dict(volume=disk_name,
                               reason=six.text_type(e)))
             LOG.exception(message)
             raise exception.VolumeBackendAPIException(data=message)
-        azure_snapshot_id = snapshot_blob.snapshot
-        LOG.info(_LI('Created Snapshot: %s in Azure.') % azure_snapshot_id)
+        LOG.info(_LI('Created Snapshot: %s in Azure.') % snapshot_name)
         metadata = snapshot['metadata']
-        metadata['azure_snapshot_id'] = azure_snapshot_id
+        metadata['azure_snapshot_id'] = snapshot_name
         return dict(metadata=metadata)
 
     def delete_snapshot(self, snapshot):
-        azure_snapshot_id = snapshot['metadata']['azure_snapshot_id']
-        LOG.debug('Calling Delet Snapshot: %s in Azure.' % azure_snapshot_id)
+        snapshot_name = self._get_name_from_id(
+            SNAPSHOT_PREFIX, snapshot['id'])
+        LOG.debug('Calling Delet Snapshot: %s in Azure.' % snapshot_name)
         try:
-            self.blob.delete_blob(
-                self.configuration.azure_storage_container_name,
-                self._get_blob_name(snapshot['volume_name']),
-                snapshot=azure_snapshot_id
+            async_action = self.snapshots.delete(
+                self.configuration.resource_group,
+                snapshot_name,
             )
+            async_action.result()
         except AzureMissingResourceHttpError:
             # If the snapshot isn't present, then don't attempt to delete
             LOG.warning(_LW("snapshot: %s not found, "
@@ -276,109 +273,65 @@ class AzureDriver(driver.VolumeDriver):
         except Exception as e:
             message = (_("Create Snapshop %(snapshop)s in Azure failed. "
                          "reason: %(reason)s")
-                       % dict(snapshop=azure_snapshot_id,
+                       % dict(snapshop=snapshot_name,
+                              reason=six.text_type(e)))
+            LOG.exception(message)
+            raise exception.VolumeBackendAPIException(data=message)
+        LOG.info(_LI('Deleted Snapshot: %s in Azure.'), snapshot_name)
+
+    def create_volume_from_snapshot(self, volume, snapshot):
+        azure_type = StorageAccountTypes.premium_lrs \
+            if 'azure_ssd' == volume.volume_type.name \
+            else StorageAccountTypes.standard_lrs
+        snapshot_name = self._get_name_from_id(
+            SNAPSHOT_PREFIX, snapshot['id'])
+        disk_name = self._get_name_from_id(
+            VOLUME_PREFIX, volume.id)
+        try:
+            snapshot_obj = self.snapshots.get(
+                self.configuration.resource_group,
+                snapshot_name
+            )
+        except Exception as e:
+            message = (_("Create Volume from Snapshot %(snapshop)s in Azure"
+                         " failed. reason: %(reason)s")
+                       % dict(snapshop=snapshot_name,
                               reason=six.text_type(e)))
             LOG.exception(message)
             raise exception.VolumeBackendAPIException(data=message)
         else:
-            LOG.info(_LI('Deleted Snapshot: %s in Azure.'), azure_snapshot_id)
-
-    def create_volume_from_snapshot(self, volume, snapshot):
-        blob_name = self._get_blob_name(volume.name)
-        azure_snapshot_id = snapshot['metadata']['azure_snapshot_id']
-        old_blob_uri = self.blob.make_blob_url(
-            self.configuration.azure_storage_container_name,
-            self._get_blob_name(snapshot['volume_name']))
-        snapshot_uri = '{}?snapshot={}'.format(old_blob_uri,
-                                               azure_snapshot_id)
-        exists = self._check_exist(
-            self._get_blob_name(snapshot['volume_name']),
-            snapshot=azure_snapshot_id)
-        if not exists:
-            LOG.warning(_LW('Copy an Inexistent Snapshot: %s in '
-                            'Azure.'), azure_snapshot_id)
-            raise exception.SnapshotNotFound(snapshot_id=snapshot['id'])
-        self._copy_blob(blob_name, snapshot_uri)
-
-        def _wait_for_copy():
-            """Called at an copy until finish."""
-            copy = self.blob.get_blob_properties(
-                self.configuration.azure_storage_container_name,
-                blob_name)
-            state = copy.properties.copy.status
-
-            if state == 'success':
-                LOG.info(_LI("Created Volume from Snapshot: %s in "
-                             "Azure."), azure_snapshot_id)
-                raise loopingcall.LoopingCallDone()
-            else:
-                LOG.debug('Create Volume from Snapshot: %(azure_snapshot_id)s'
-                          ' in Azure Progress %(progress)s' %
-                          dict(azure_snapshot_id=azure_snapshot_id,
-                               progress=copy.properties.copy.progress))
-
-        timer = loopingcall.FixedIntervalLoopingCall(_wait_for_copy)
-        timer.start(interval=0.5).wait()
-
-        # check size of new create volume with source snapshot, can't resize
-        # blob in azure.
-        if volume['size'] != snapshot['volume_size']:
-            LOG.warning(_LW("Created Volume from Snapshot: %(blob_name)s in"
-                            " Azure can't be resized, use Snapshot size %("
-                            "volume_size)s GB for new Volume."),
-                        dict(blob_name=blob_name,
-                             volume_size=snapshot['volume_size']))
-            volume.update(dict(size=snapshot['volume_size']))
-            volume.save()
+            self._copy_disk(disk_name, snapshot_obj.id, azure_type,
+                            volume['size'])
 
     def create_cloned_volume(self, volume, src_vref):
-        src_blob_name = self._get_blob_name(src_vref['name'])
-        exists = self._check_exist(src_blob_name)
-        if not exists:
-            LOG.warning(_LW('Copy an Inexistent Volume: %s in '
-                            'Azure.'), src_blob_name)
+        azure_type = StorageAccountTypes.premium_lrs \
+            if 'azure_ssd' == src_vref['volume_type']['name'] \
+            else StorageAccountTypes.standard_lrs
+        src_vref_name = self._get_name_from_id(
+            VOLUME_PREFIX, src_vref['id'])
+        disk_name = self._get_name_from_id(
+            VOLUME_PREFIX, volume.id)
+        try:
+            src_vref_obj = self.disks.get(
+                self.configuration.resource_group,
+                src_vref_name
+            )
+        except Exception as e:
+            message = (_("Create Cloned Volume %(volume)s in Azure"
+                         " failed. reason: %(reason)s")
+                       % dict(volume=src_vref_name,
+                              reason=six.text_type(e)))
+            LOG.exception(message)
             raise exception.VolumeNotFound(volume_id=src_vref['id'])
-
-        blob_name = self._get_blob_name(volume.name)
-        src_blob_uri = self.blob.make_blob_url(
-            self.configuration.azure_storage_container_name, src_blob_name)
-        self._copy_blob(blob_name, src_blob_uri)
-
-        def _wait_for_copy():
-            """Called at an copy until finish."""
-            copy = self.blob.get_blob_properties(
-                self.configuration.azure_storage_container_name,
-                blob_name)
-            state = copy.properties.copy.status
-
-            if state == 'success':
-                LOG.info(_LI("Created Cloned Volume: %s in "
-                             "Azure."), blob_name)
-                raise loopingcall.LoopingCallDone()
-            else:
-                LOG.debug('Create Volume from Volume: %(blob_name)s'
-                          ' in Azure Progress %(progress)s' %
-                          dict(blob_name=blob_name,
-                               progress=copy.properties.copy.progress))
-
-        timer = loopingcall.FixedIntervalLoopingCall(_wait_for_copy)
-        timer.start(interval=0.5).wait()
-
-        # check size of new create volume with source volume, can't resize
-        # blob in azure.
-        if volume['size'] != src_vref['size']:
-            LOG.warning(_LW("Created Cloned Volume: %(blob_name)s in Azure"
-                            " can't be resized, use Source  size "
-                            "%(volume_size)s GB for new Volume."),
-                        dict(blob_name=blob_name,
-                             volume_size=src_vref['size']))
-            volume.update(dict(size=src_vref['size']))
-            volume.save()
+        self._copy_disk(disk_name, src_vref_obj.id, azure_type,
+                        volume['size'])
 
     def clone_image(self, context, volume,
                     image_location, image_meta,
                     image_service):
-
+        azure_type = StorageAccountTypes.premium_lrs \
+            if 'azure_ssd' == volume.volume_type.name \
+            else StorageAccountTypes.standard_lrs
         # image to create volume must has os_type property.
         os_type = image_meta['properties'].get('os_type')
         if not os_type:
@@ -387,60 +340,29 @@ class AzureDriver(driver.VolumeDriver):
                        % dict(image_id=image_meta['id']))
             LOG.exception(message)
             raise exception.VolumeBackendAPIException(data=message)
-        image_blob = IMAGE_PREFIX + '-' + image_meta['id']
-        src_blob_name = self._get_blob_name(image_blob)
-        exists = self._check_exist(
-            src_blob_name,
-            container_name=self.configuration.azure_image_container_name)
-        if not exists:
-            LOG.warning(_LW('Copy an Inexistent Image: %s in '
-                            'Azure.'), src_blob_name)
-            raise exception.ImageNotFound(image_id=image_meta['id'])
-
-        blob_name = self._get_blob_name(volume.name)
-        src_blob_uri = self.blob.make_blob_url(
-            self.configuration.azure_image_container_name, src_blob_name)
-        self._copy_blob(blob_name, src_blob_uri)
-
-        def _wait_for_copy():
-            """Called at an copy until finish."""
-            copy = self.blob.get_blob_properties(
-                self.configuration.azure_storage_container_name,
-                blob_name)
-            state = copy.properties.copy.status
-
-            if state == 'success':
-                LOG.info(_LI("Created Volume from Image: %s in "
-                             "Azure."), blob_name)
-                raise loopingcall.LoopingCallDone()
-            else:
-                LOG.debug('Create Volume from Image: %(blob_name)s'
-                          ' in Azure Progress %(progress)s' %
-                          dict(blob_name=blob_name,
-                               progress=copy.properties.copy.progress))
-
-        timer = loopingcall.FixedIntervalLoopingCall(_wait_for_copy)
-        timer.start(interval=0.5).wait()
-
-        # check size of new create volume with source volume, can't resize
-        # blob in azure.
-        image_size = image_meta['properties'].get('azure_image_size_gb')
-        if not image_size:
+        image_name = self._get_name_from_id(
+            IMAGE_PREFIX, image_meta['id'])
+        disk_name = self._get_name_from_id(
+            VOLUME_PREFIX, volume.id)
+        try:
+            image_obj = self.disks.get(
+                self.configuration.resource_group,
+                image_name
+            )
+        except Exception as e:
             message = (_("Create Volume from Image %(image_id)s in Azure"
-                         " failed. reason: image miss azure_image_size_gb"
-                         " property.")
-                       % dict(image_id=image_meta['id']))
+                         " failed. reason: %(reason)s")
+                       % dict(image_id=image_meta['id'],
+                              reason=six.text_type(e)))
             LOG.exception(message)
             raise exception.VolumeBackendAPIException(data=message)
+        self._copy_disk(disk_name, image_obj.id, azure_type)
 
         metadata = volume['metadata']
         metadata['os_type'] = os_type
-        LOG.info(_LI("Created Volume: %(blob_name)s from Image in Azure"
-                     " can't be resized, use size of Image"
-                     " %(image_size)s GB for new Volume."),
-                 dict(blob_name=blob_name,
-                      image_size=image_size))
-        return dict(size=image_size, metadata=metadata), True
+        LOG.info(_LI("Created Volume: %(disk_name)s from Image in Azure."),
+                 dict(disk_name=disk_name))
+        return dict(metadata=metadata), True
 
     def copy_image_to_volume(self, context, volume, image_service, image_id):
         """Nothing need to do since we copy image to volume in clone_image."""
@@ -449,47 +371,67 @@ class AzureDriver(driver.VolumeDriver):
     def copy_volume_to_image(self, context, volume, image_service, image_meta):
         """Copy the volume to the specified image.
 
-        copy volume blob to image blob in azure.
+        copy disk to image and disk for image.
         """
-
-        image_blob = IMAGE_PREFIX + '-' + image_meta['id']
-        src_blob_name = self._get_blob_name(volume['name'])
-        exists = self._check_exist(
-            src_blob_name,
-            container_name=self.configuration.azure_storage_container_name)
-        if not exists:
-            LOG.warning(_LW('Copy an Inexistent Volume: %s in '
-                            'Azure.'), src_blob_name)
-            raise exception.VolumeNotFound(volume_id=volume['id'])
-
-        blob_name = self._get_blob_name(image_blob)
-        src_blob_uri = self.blob.make_blob_url(
-            self.configuration.azure_storage_container_name, src_blob_name)
-        self._copy_blob(blob_name, src_blob_uri,
-                        self.configuration.azure_image_container_name)
-
-        def _wait_for_copy():
-            """Called at an copy until finish."""
-            copy = self.blob.get_blob_properties(
-                self.configuration.azure_image_container_name,
-                blob_name)
-            state = copy.properties.copy.status
-
-            if state == 'success':
-                LOG.info(_LI("Copy Volume to Image: %s in "
-                             "Azure."), blob_name)
-                raise loopingcall.LoopingCallDone()
-            else:
-                LOG.debug('Copy Volume to Image: %(blob_name)s'
-                          ' in Azure Progress %(progress)s' %
-                          dict(blob_name=blob_name,
-                               progress=copy.properties.copy.progress))
-
-        timer = loopingcall.FixedIntervalLoopingCall(_wait_for_copy)
-        timer.start(interval=0.5).wait()
+        # TODO(haifeng)user delete iamge on openstack, image still in Azure.
+        azure_type = StorageAccountTypes.premium_lrs \
+            if 'azure_ssd' == volume.volume_type.name \
+            else StorageAccountTypes.standard_lrs
         metadata = volume.get('volume_metadata', [])
         metadata_dict = {item['key']: item['value'] for item in metadata}
         os_type = metadata_dict.get('os_type')
+        if not os_type:
+            reason = 'Volume miss os_type can\'t copy to Image.'
+            message = (_("Copy Volume to Image %(image_id)s in Azure"
+                         " failed. reason: %(reason)s")
+                       % dict(image_id=image_meta['id'],
+                              reason=reason))
+            LOG.exception(message)
+            raise exception.VolumeBackendAPIException(data=message)
+
+        disk_name = self._get_name_from_id(
+            VOLUME_PREFIX, volume['id'])
+        image_name = self._get_name_from_id(
+            IMAGE_PREFIX, image_meta['id'])
+        try:
+            disk_obj = self.disks.get(
+                self.configuration.resource_group,
+                disk_name
+            )
+        except Exception as e:
+            message = (_("Create Image from Volume %(volume)s in Azure"
+                         " failed. reason: %(reason)s")
+                       % dict(volume=volume['id'],
+                              reason=six.text_type(e)))
+            LOG.exception(message)
+            raise exception.VolumeBackendAPIException(data=message)
+        self._copy_disk(image_name, disk_obj.id, azure_type)
+        try:
+            image_dict = {
+                'location': self.configuration.location,
+                'storage_profile': {
+                    'os_disk': {
+                        'os_type': os_type,
+                        'os_state': "Generalized",
+                        'managed_disk': {
+                            'id': disk_obj.id
+                        }
+                    }
+                }
+            }
+            async_action = self.images.create_or_update(
+                self.configuration.resource_group,
+                image_name,
+                image_dict
+            )
+            async_action.result()
+        except Exception as e:
+            message = (_("Copy Volume to Image %(volume)s in Azure"
+                         " failed. reason: %(reason)s")
+                       % dict(volume=disk_name,
+                              reason=six.text_type(e)))
+            LOG.exception(message)
+            raise exception.VolumeBackendAPIException(data=message)
 
         # create a empty file to glance
         with image_utils.temporary_file() as tmp:
@@ -504,3 +446,69 @@ class AzureDriver(driver.VolumeDriver):
                                         volume.size
                                     }
         image_service.update(context, image_meta['id'], image_meta)
+
+    def retype(self, context, volume, new_type, diff, host):
+        azure_type = StorageAccountTypes.premium_lrs \
+            if 'azure_ssd' == new_type.name \
+            else StorageAccountTypes.standard_lrs
+        disk_name = self._get_name_from_id(
+            VOLUME_PREFIX, volume['id'])
+        try:
+            disk_obj = self.disks.get(
+                self.configuration.resource_group,
+                disk_name
+            )
+        except Exception as e:
+            message = (_("Retype Volume %(volume)s in Azure"
+                         " failed. reason: %(reason)s")
+                       % dict(volume=volume['id'],
+                              reason=six.text_type(e)))
+            LOG.exception(message)
+            raise exception.VolumeBackendAPIException(data=message)
+        disk_obj.account_type = azure_type
+        try:
+            async_action = self.disks.create_or_update(
+                self.configuration.resource_group,
+                disk_name,
+                disk_obj
+            )
+            async_action.result()
+        except Exception as e:
+            message = (_("Retype disk %(blob_name)s in Azure"
+                         " failed. reason: %(reason)s")
+                       % dict(blob_name=disk_name,
+                              reason=six.text_type(e)))
+            LOG.exception(message)
+            raise exception.VolumeBackendAPIException(data=message)
+        return True
+
+    def extend_volume(self, volume, new_size):
+        disk_name = self._get_name_from_id(
+            VOLUME_PREFIX, volume['id'])
+        try:
+            disk_obj = self.disks.get(
+                self.configuration.resource_group,
+                disk_name
+            )
+        except Exception as e:
+            message = (_("Extend Volume %(volume)s in Azure"
+                         " failed. reason: %(reason)s")
+                       % dict(volume=volume['id'],
+                              reason=six.text_type(e)))
+            LOG.exception(message)
+            raise exception.VolumeBackendAPIException(data=message)
+        disk_obj.disk_size_gb = new_size
+        try:
+            async_action = self.disks.create_or_update(
+                self.configuration.resource_group,
+                disk_name,
+                disk_obj
+            )
+            async_action.result()
+        except Exception as e:
+            message = (_("Extend disk %(blob_name)s in Azure"
+                         " failed. reason: %(reason)s")
+                       % dict(blob_name=disk_name,
+                              reason=six.text_type(e)))
+            LOG.exception(message)
+            raise exception.VolumeBackendAPIException(data=message)

@@ -1,9 +1,7 @@
 import ddt
-
 import mock
 from oslo_config import cfg
 from oslo_service import loopingcall
-
 from cinder import db
 from cinder import exception
 from cinder.objects.volume import MetadataObject
@@ -12,12 +10,10 @@ from cinder.volume.drivers.azure import driver
 from cinder.volume.drivers.azure.driver import AzureMissingResourceHttpError
 import cinder.volume.utils
 
-
 CONF = cfg.CONF
 
 
 class FakeLoopingCall(object):
-
     def __init__(self, method):
         self.call = method
 
@@ -29,7 +25,6 @@ class FakeLoopingCall(object):
 
 
 class FakeObj(object):
-
     def __getitem__(self, name):
         return getattr(self, name)
 
@@ -57,20 +52,24 @@ class AzureVolumeDriverTestCase(test_volume.DriverTestCase):
 
         self.driver = driver.AzureDriver(configuration=self.configuration,
                                          db=db)
-        metadata_obj = MetadataObject()
-        metadata_obj['os_type'] = 'fake_type'
+        metadata_obj = MetadataObject('os_type', 'fake_type')
         self.fake_vol = FakeObj()
         self.fake_vol.name = 'vol_name'
         self.fake_vol.id = 'vol_id'
         self.fake_vol.size = 1
         self.fake_vol.metadata = dict(os_type='fake_type')
-        self.fake_vol.volume_metadata = [MetadataObject()]
+        self.fake_vol.volume_metadata = [metadata_obj]
+        volume_type = FakeObj()
+        volume_type.name = 'azure_hdd'
+        self.fake_vol.volume_type = volume_type
         self.fake_snap = dict(
             name='snap_name',
             id='snap_id',
-            volume_name='vol_name',
+            volume_id='volume_id',
             properties=dict(os_type='linux', azure_image_size_gb=2),
-            metadata=dict(azure_snapshot_id='snap_id'))
+            metadata=dict(azure_snapshot_id='snap_id'),
+            volume_type=volume_type
+        )
         self.stubs.Set(loopingcall, 'FixedIntervalLoopingCall',
                        lambda a: FakeLoopingCall(a))
 
@@ -89,70 +88,40 @@ class AzureVolumeDriverTestCase(test_volume.DriverTestCase):
                           driver.AzureDriver,
                           configuration=self.configuration, db=db)
 
-    @mock.patch('cinder.volume.drivers.azure.driver.Azure')
-    def test_init_create_blob_container_raise(self, mock_azure):
-        blob = mock.Mock()
-        blob.blob.create_container.side_effect = Exception
-        mock_azure.return_value = blob
-        self.assertRaises(exception.VolumeBackendAPIException,
-                          driver.AzureDriver,
-                          configuration=self.configuration, db=db)
-
     def test_get_volume_stats(self):
         ret = self.driver.get_volume_stats()
         self.assertEqual(self.configuration.azure_total_capacity_gb,
                          ret['total_capacity_gb'])
 
-    def test_get_blob_name(self):
+    def test_get_name_from_id(self):
+        prefix = 'prefix'
         name = 'name'
-        ret = self.driver._get_blob_name(name)
-        self.assertEqual(name + '.' + driver.VHD_EXT, ret)
+        ret = self.driver._get_name_from_id(prefix, name)
+        self.assertEqual(prefix + '-' + name, ret)
 
-    def test_copy_blob_raise(self):
+    def test_copy_disk_raise(self):
         # raise test
-        self.driver.blob.copy_blob.side_effect = Exception
+        self.driver.disks.create_or_update = Exception
         self.assertRaises(
             exception.VolumeBackendAPIException,
-            self.driver._copy_blob,
-            self.fake_vol, 'source')
+            self.driver._copy_disk,
+            self.fake_vol, 'source', 'type')
 
-    def test_check_exist_raise(self):
-        # raise test
-        self.driver.blob.exists.side_effect = Exception
-        self.assertRaises(
-            exception.VolumeBackendAPIException,
-            self.driver._check_exist,
-            self.fake_vol)
-
-    def test_check_exist(self):
-        self.driver.blob.exists.side_effect = None
-        exist = self.driver.blob.exists.retrun_value = True
-        self.assertEqual(True, exist)
-
-    @mock.patch.object(cinder.volume.drivers.azure.vhd_utils,
-                       'generate_vhd_footer')
-    def test_create_volume(self, mo_vhd):
-        mo_vhd.return_value = 'vhd_footer'
+    def test_create_volume(self):
         self.driver.create_volume(self.fake_vol)
-        self.driver.blob.update_page.assert_called()
+        self.driver.disks.create_or_update.assert_called()
 
-    @mock.patch.object(cinder.volume.drivers.azure.vhd_utils,
-                       'generate_vhd_footer')
-    def test_create_volume_create_raise(self, mo_vhd):
-        mo_vhd.return_value = 'vhd_footer'
-        self.driver.blob.update_page.side_effect = Exception
+    def test_create_volume_create_raise(self):
+        self.driver.disks.create_or_update.side_effect = Exception
         self.assertRaises(
             exception.VolumeBackendAPIException,
             self.driver.create_volume,
             self.fake_vol)
-        self.driver.blob.delete_blob.assert_called()
+        self.driver.disks.delete.assert_called()
 
-    @mock.patch.object(cinder.volume.drivers.azure.vhd_utils,
-                       'generate_vhd_footer')
-    def test_create_volume_delete_raise(self, mo_vhd):
-        mo_vhd.return_value = 'vhd_footer'
-        self.driver.blob.update_page.side_effect = Exception
-        self.driver.blob.delete_blob.side_effect = Exception
+    def test_create_volume_delete_raise(self):
+        self.driver.disks.create_or_update.side_effect = Exception
+        self.driver.disks.delete.side_effect = Exception
         self.assertRaises(
             exception.VolumeBackendAPIException,
             self.driver.create_volume,
@@ -160,16 +129,16 @@ class AzureVolumeDriverTestCase(test_volume.DriverTestCase):
 
     def test_delete_volume(self):
         self.driver.delete_volume(self.fake_vol)
-        self.driver.blob.delete_blob.assert_called()
+        self.driver.disks.delete.assert_called()
 
     def test_delete_volume_miss_raise(self):
-        self.driver.blob.delete_blob.side_effect = \
+        self.driver.disks.delete.side_effect = \
             AzureMissingResourceHttpError('', '')
         self.driver.delete_volume(self.fake_vol)
-        self.driver.blob.delete_blob.assert_called()
+        self.driver.disks.delete.assert_called()
 
     def test_delete_volume_delete_raise(self):
-        self.driver.blob.delete_blob.side_effect = Exception
+        self.driver.disks.delete.side_effect = Exception
         self.assertRaises(
             exception.VolumeBackendAPIException,
             self.driver.delete_volume,
@@ -181,15 +150,14 @@ class AzureVolumeDriverTestCase(test_volume.DriverTestCase):
         self.assertEqual(None, ret['data']['device_path'])
 
     def test_create_snapshot(self):
-        snap_obj = FakeObj()
-        snap_obj.snapshot = 'snap_id'
-        self.driver.blob.snapshot_blob.return_value = snap_obj
         ret = self.driver.create_snapshot(self.fake_snap)
-        self.assertEqual(snap_obj.snapshot,
+        snapshot_name = self.driver._get_name_from_id(driver.SNAPSHOT_PREFIX,
+                                                      self.fake_snap['id'])
+        self.assertEqual(snapshot_name,
                          ret['metadata']['azure_snapshot_id'])
 
     def test_create_snapshot_raise(self):
-        self.driver.blob.snapshot_blob.side_effect = Exception
+        self.driver.snapshots.create_or_update.side_effect = Exception
         self.assertRaises(
             exception.VolumeBackendAPIException,
             self.driver.create_snapshot,
@@ -197,110 +165,79 @@ class AzureVolumeDriverTestCase(test_volume.DriverTestCase):
 
     def test_delete_snapshot(self):
         self.driver.delete_snapshot(self.fake_snap)
-        self.driver.blob.delete_blob.assert_called()
+        self.driver.snapshots.delete.assert_called()
 
     def test_delete_snapshot_miss_raise(self):
-        self.driver.blob.delete_blob.side_effect = \
+        self.driver.snapshots.delete.side_effect = \
             AzureMissingResourceHttpError('', '')
         self.driver.delete_snapshot(self.fake_snap)
-        self.driver.blob.delete_blob.assert_called()
+        self.driver.snapshots.delete.assert_called()
 
     def test_delete_snapshot_delete_raise(self):
-        self.driver.blob.delete_blob.side_effect = Exception
+        self.driver.snapshots.delete.side_effect = Exception
         self.assertRaises(
             exception.VolumeBackendAPIException,
             self.driver.delete_snapshot,
             self.fake_snap)
 
-    @mock.patch.object(cinder.volume.drivers.azure.driver.AzureDriver,
-                       '_check_exist')
-    def test_create_volume_from_snapshot_miss(self, mo_exit):
+    def test_create_volume_from_snapshot_miss(self):
         # non exist volume, raise not found
-        mo_exit.return_value = False
+        self.driver.snapshots.get.side_effect = Exception
         self.assertRaises(
-            exception.SnapshotNotFound,
+            exception.VolumeBackendAPIException,
             self.driver.create_volume_from_snapshot,
             self.fake_vol, self.fake_snap)
 
     @mock.patch.object(cinder.volume.drivers.azure.driver.AzureDriver,
-                       '_check_exist')
-    def test_create_volume_from_snapshot(self, mo_exit):
-        mo_exit.return_value = True
-        self.fake_snap['volume_size'] = 1
-        self.fake_vol.size = 2
-        self.fake_vol.update = mock.Mock()
-        self.fake_vol.save = mock.Mock()
+                       '_copy_disk')
+    def test_create_volume_from_snapshot(self, mo_copy):
         self.driver.create_volume_from_snapshot(self.fake_vol, self.fake_snap)
-        self.fake_vol.update.assert_called_once_with(
-            dict(size=self.fake_snap['volume_size']))
-        self.fake_vol.save.assert_called_once()
+        mo_copy.assert_called()
 
-    @mock.patch.object(cinder.volume.drivers.azure.driver.AzureDriver,
-                       '_check_exist')
-    def test_create_cloned_volume_miss(self, mo_exit):
+    def test_create_cloned_volume_miss(self):
         # non exist volume, raise not found
-        mo_exit.return_value = False
+        self.driver.disks.get.side_effect = Exception
         self.assertRaises(
             exception.VolumeNotFound,
             self.driver.create_cloned_volume,
             self.fake_vol, self.fake_snap)
 
     @mock.patch.object(cinder.volume.drivers.azure.driver.AzureDriver,
-                       '_check_exist')
-    def test_create_cloned_volume(self, mo_exit):
-        mo_exit.return_value = True
-        self.fake_snap['size'] = 1
-        self.fake_vol.size = 2
-        self.fake_vol.update = mock.Mock()
-        self.fake_vol.save = mock.Mock()
+                       '_copy_disk')
+    def test_create_cloned_volume(self, mo_copy):
         self.driver.create_cloned_volume(self.fake_vol, self.fake_snap)
-        self.fake_vol.update.assert_called_once_with(
-            dict(size=self.fake_snap['size']))
-        self.fake_vol.save.assert_called_once()
+        mo_copy.assert_called()
 
-    @mock.patch.object(cinder.volume.drivers.azure.driver.AzureDriver,
-                       '_check_exist')
-    def test_create_volume_from_image_miss(self, mo_exit):
+    def test_create_volume_from_image_miss(self):
         # non exist image, raise not found
-        mo_exit.return_value = False
+        self.driver.disks.get.side_effect = Exception
         self.assertRaises(
-            exception.ImageNotFound,
+            exception.VolumeBackendAPIException,
             self.driver.clone_image,
             self.context, self.fake_vol, '', self.fake_snap, '')
 
     @mock.patch.object(cinder.volume.drivers.azure.driver.AzureDriver,
-                       '_check_exist')
-    def test_create_volume_from_image(self, mo_exit):
-        mo_exit.return_value = True
-        self.fake_vol.size = 2
-        self.fake_vol.update = mock.Mock()
-        self.fake_vol.save = mock.Mock()
-        ret = self.driver.clone_image(self.context, self.fake_vol, '',
-                                      self.fake_snap, '')
-        self.assertEqual(self.fake_snap['properties']['azure_image_size_gb'],
-                         ret[0]['size'])
-        self.assertEqual(self.fake_snap['properties']['os_type'],
-                         ret[0]['metadata']['os_type'])
+                       '_copy_disk')
+    def test_create_volume_from_image(self, mo_copy):
+        self.driver.clone_image(self.context, self.fake_vol, '',
+                                self.fake_snap, '')
+        mo_copy.assert_called()
 
-    @mock.patch.object(cinder.volume.drivers.azure.driver.AzureDriver,
-                       '_check_exist')
-    def test_copy_volume_to_image_miss(self, mo_exit):
+    def test_copy_volume_to_image_miss(self):
         # non exist volume, raise not found
-        mo_exit.return_value = False
+        self.driver.disks.get.side_effect = Exception
         self.assertRaises(
-            exception.VolumeNotFound,
+            exception.VolumeBackendAPIException,
             self.driver.copy_volume_to_image,
             self.context, self.fake_vol, '', self.fake_snap)
 
     @mock.patch('cinder.image.image_utils.upload_volume')
     @mock.patch.object(cinder.volume.drivers.azure.driver.AzureDriver,
-                       '_check_exist')
-    def test_copy_volume_to_image(self, mo_upload, mo_exit):
-        mo_exit.return_value = True
-        self.driver._copy_blob = mock.Mock()
+                       '_copy_disk')
+    def test_copy_volume_to_image(self, mo_upload, mo_copy):
         self.fake_vol.size = 2
         self.driver.copy_volume_to_image(self.context,
                                          self.fake_vol,
                                          mock.Mock(),
                                          self.fake_snap)
-        self.driver._copy_blob.assert_called()
+        mo_copy.assert_called()
